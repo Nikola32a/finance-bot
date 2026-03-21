@@ -634,11 +634,36 @@ def build_monthly_report():
 # ============================================================
 # ДОЛГИ
 # ============================================================
+def normalize_currency_text(text: str) -> str:
+    """Заменяет текстовые варианты валют на стандартные обозначения"""
+    replacements = [
+        # Доллары
+        (r'долар[ыаіів]*', 'USD'),
+        (r'доллар[ыаов]*', 'USD'),
+        (r'бакс[ыаов]*', 'USD'),
+        (r'\$', 'USD'),
+        # Евро
+        (r'евро', 'EUR'),
+        (r'€', 'EUR'),
+        # Гривны
+        (r'гривн[яеьи]*', 'UAH'),
+        (r'грн', 'UAH'),
+        (r'₴', 'UAH'),
+    ]
+    result = text
+    for pattern, replacement in replacements:
+        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    return result
+
 def parse_debt(text):
     """Парсит текст с поддержкой нескольких валют: 'Артём 550 долларов и 300 гривен'"""
+    # Нормализуем валюты перед отправкой в AI
+    normalized = normalize_currency_text(text)
+
     prompt = f"""Из текста извлеки информацию о долге. Может быть несколько сумм в разных валютах.
 
-Текст: "{text}"
+Текст: "{normalized}"
+Оригинал: "{text}"
 
 Верни ТОЛЬКО JSON без markdown-тиков:
 {{
@@ -651,7 +676,7 @@ def parse_debt(text):
 
 Правила:
 - name: только имя
-- currency: UAH для гривен/грн/₴, USD для долларов/$, EUR для евро/€
+- currency: UAH для гривен/грн/UAH/₴, USD для долларов/USD/$, EUR для евро/EUR/€
 - Если валюта не указана — UAH
 - amounts: массив всех сумм (может быть несколько)
 - note: краткое описание"""
