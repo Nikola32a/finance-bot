@@ -405,6 +405,85 @@ def build_months_comparison() -> str:
 # ============================================================
 budget_storage = {}
 
+# Русские названия месяцев
+MONTH_NAMES = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+               "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+MONTH_NAMES_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня",
+                   "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+
+def month_name(month_num: int, genitive=False) -> str:
+    names = MONTH_NAMES_GEN if genitive else MONTH_NAMES
+    return names[month_num - 1]
+
+# ============================================================
+# ДЕНЬ ЗАРПЛАТЫ
+# ============================================================
+salary_storage = {}  # {chat_id: {"day": 25, "amount": 30000}}
+
+def get_salary_info(chat_id):
+    return salary_storage.get(str(chat_id))
+
+def set_salary_info(chat_id, day, amount=None):
+    salary_storage[str(chat_id)] = {"day": day, "amount": amount}
+
+def build_salary_status(chat_id) -> str:
+    info = get_salary_info(chat_id)
+    if not info:
+        return None
+
+    now = datetime.now()
+    salary_day = info["day"]
+    amount = info.get("amount")
+
+    # Считаем дни до зарплаты
+    if now.day < salary_day:
+        days_left = salary_day - now.day
+        next_salary = now.replace(day=salary_day)
+    else:
+        # Уже прошла — считаем до следующего месяца
+        next_month = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
+        try:
+            next_salary = next_month.replace(day=salary_day)
+        except:
+            next_salary = next_month.replace(day=28)
+        days_left = (next_salary - now).days
+
+    # Сколько уже потрачено с последней зарплаты
+    records = get_current_month_records()
+    sum_key = get_sum_key(records) if records else "Сумма (₴)"
+    spent_this_month = sum(float(r[sum_key]) for r in records if r[sum_key]) if records else 0
+
+    lines = [f"💵 *День зарплаты — {salary_day}-е число*\n"]
+
+    if days_left == 0:
+        lines.append("🎉 *Сегодня зарплата!*")
+    elif days_left == 1:
+        lines.append("⏰ *Завтра зарплата!*")
+    else:
+        lines.append(f"📅 До зарплаты: *{days_left} дней*")
+        lines.append(f"   ({next_salary.strftime('%d')} {month_name(next_salary.month, genitive=True)})")
+
+    lines.append(f"\n💸 Потрачено в этом месяце: *{spent_this_month:,.0f} ₴*")
+
+    if amount:
+        left_after = amount - spent_this_month
+        if days_left > 0:
+            per_day = left_after / days_left if days_left > 0 else 0
+            lines.append(f"💰 Зарплата: *{amount:,.0f} ₴*")
+            lines.append(f"🟢 Осталось: *{left_after:,.0f} ₴*")
+            if per_day > 0:
+                lines.append(f"📊 Можно тратить: *{per_day:,.0f} ₴/день* до зарплаты")
+            else:
+                lines.append(f"🔴 Уже потрачено больше зарплаты!")
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# БЮДЖЕТ
+# ============================================================
+budget_storage = {}
+
 def get_budget_status(chat_id):
     budget = budget_storage.get(str(chat_id))
     if not budget:
@@ -449,7 +528,7 @@ def build_monthly_report():
     days_passed = now.day
     daily_avg = stats["total"] / days_passed if days_passed > 0 else 0
     projected = daily_avg * 30
-    lines = [f"📆 *Отчёт за {now.strftime('%B %Y')}*\n"]
+    lines = [f"📆 *Отчёт за {month_name(now.month)} {now.year}*\n"]
     lines.append(f"💰 Потрачено: *{stats['total']:,.0f} ₴* за {days_passed} дней")
     lines.append(f"📊 В среднем: *{daily_avg:,.0f} ₴/день*")
     lines.append(f"📈 Прогноз на месяц: *~{projected:,.0f} ₴*\n")
@@ -746,7 +825,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [KeyboardButton("📊 Статистика"), KeyboardButton("📅 Отчёт за неделю")],
         [KeyboardButton("📆 Отчёт за месяц"), KeyboardButton("💰 Бюджет")],
         [KeyboardButton("💸 Долги"), KeyboardButton("💡 Советы")],
-        [KeyboardButton("📊 Сравнение месяцев")]
+        [KeyboardButton("📊 Сравнение месяцев"), KeyboardButton("💵 Зарплата")]
     ]
     await update.message.reply_text(
         "👋 Привет! Я твой финансовый аналитик.\n\n"
@@ -775,7 +854,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now = datetime.now()
         daily_avg = stats["total"] / now.day if now.day > 0 else 0
         projected = daily_avg * 30
-        lines = [f"📊 *Статистика за {now.strftime('%B')}* ({stats['count']} записей)\n"]
+        lines = [f"📊 *Статистика за {month_name(now.month)}* ({stats['count']} записей)\n"]
         for cat, amt in sorted(stats["by_category"].items(), key=lambda x: -x[1]):
             pct = int((amt / stats["total"]) * 100)
             lines.append(f"{EMOJI_MAP.get(cat, '📦')} {cat}: *{amt:,.0f} ₴* ({pct}%)")
@@ -840,6 +919,21 @@ async def debts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=keyboard)
     else:
         await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def salary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    info = get_salary_info(update.effective_chat.id)
+    if not info:
+        await update.message.reply_text(
+            "💵 *День зарплаты не установлен*\n\n"
+            "Напиши одним из способов:\n"
+            "• «Зарплата 25» — только день\n"
+            "• «Зарплата 25 числа 35000» — день и сумма\n"
+            "• «Получаю зарплату 10-го 28000»",
+            parse_mode="Markdown"
+        )
+        return
+    status = build_salary_status(update.effective_chat.id)
+    await update.message.reply_text(status, parse_mode="Markdown")
 
 async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Сравниваю месяцы...")
@@ -971,6 +1065,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await monthly_report_command(update, context); return
     if text == "💰 Бюджет":
         await budget_command(update, context); return
+    if text == "💵 Зарплата":
+        await salary_command(update, context); return
     if text == "📊 Сравнение месяцев":
         await compare_command(update, context); return
     if text == "💡 Советы":
@@ -981,6 +1077,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     lower = text.lower()
+
+    # Установка зарплаты
+    salary_keywords = ["зарплата", "зарплату", "получаю", "получу", "аванс", "зп"]
+    if any(kw in lower for kw in salary_keywords):
+        numbers = re.findall(r'\d+', text)
+        if numbers:
+            day = int(numbers[0])
+            amount = float(numbers[1]) if len(numbers) > 1 else None
+            if 1 <= day <= 31:
+                set_salary_info(update.effective_chat.id, day, amount)
+                amount_str = f" — *{amount:,.0f} ₴*" if amount else ""
+                await update.message.reply_text(
+                    f"💵 *Зарплата установлена!*\n\n"
+                    f"📅 День: *{day}-е число*{amount_str}\n\n"
+                    f"Теперь нажми кнопку *💵 Зарплата* чтобы видеть сколько можно тратить в день.",
+                    parse_mode="Markdown"
+                )
+                return
 
     # Установка бюджета
     if "бюджет" in lower:
