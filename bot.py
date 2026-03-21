@@ -23,7 +23,7 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Никотин", "Другое"]
+CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Другое"]
 
 
 def get_sheet():
@@ -111,7 +111,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
- async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "❓ *Помощь*\n\n"
         "Говори или пиши о своих тратах:\n"
@@ -137,7 +137,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         emoji_map = {
             "Еда / продукты": "🍔", "Транспорт": "🚗",
-            "Развлечения": "🎮", "Здоровье / аптека": "💊", "Никотин": "🚬", "Другое": "📦"
+            "Развлечения": "🎮", "Здоровье / аптека": "💊", "Другое": "📦"
         }
         lines = [f"📊 *Статистика трат* ({stats['count']} записей)\n"]
         for cat, amt in sorted(stats["by_category"].items(), key=lambda x: -x[1]):
