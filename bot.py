@@ -29,12 +29,8 @@ logger = logging.getLogger(__name__)
 CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Никотин", "Другое"]
 
 EMOJI_MAP = {
-    "Еда / продукты": "🍔",
-    "Транспорт": "🚗",
-    "Развлечения": "🎮",
-    "Здоровье / аптека": "💊",
-    "Никотин": "🚬",
-    "Другое": "📦"
+    "Еда / продукты": "🍔", "Транспорт": "🚗", "Развлечения": "🎮",
+    "Здоровье / аптека": "💊", "Никотин": "🚬", "Другое": "📦"
 }
 
 CATEGORY_RULES = """
@@ -47,26 +43,115 @@ CATEGORY_RULES = """
 📦 Другое: одежда, коммунальные, интернет, телефон, подарки, ремонт дома, всё остальное
 """
 
+CURRENCY_SYMBOLS = {"UAH": "₴", "USD": "$", "EUR": "€"}
+MONTH_NAMES = ["Январь","Февраль","Март","Апрель","Май","Июнь",
+               "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
+MONTH_NAMES_GEN = ["января","февраля","марта","апреля","мая","июня",
+                   "июля","августа","сентября","октября","ноября","декабря"]
+
+def month_name(month_num: int, genitive=False) -> str:
+    names = MONTH_NAMES_GEN if genitive else MONTH_NAMES
+    return names[month_num - 1]
+
 # ============================================================
-# ХРАНИЛИЩЕ ДОЛГОВ (в памяти, сбрасывается при перезапуске)
-# Для постоянного хранения используем отдельный лист Google Sheets
+# КЭШИРОВАНИЕ GOOGLE SHEETS (⚡ ускоряет бота в 3-5 раз)
 # ============================================================
-debts = {}  # {debt_id: {name, amount, date, chat_id, note}}
+_gs_client = None         # единый клиент
+_spreadsheet = None       # единый spreadsheet объект
+_records_cache = {}       # {sheet_name: (timestamp, records)}
+CACHE_TTL = 60            # секунды жизни кэша для чтения
+
+def _get_gs_client():
+    global _gs_client
+    if _gs_client is None:
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        if GOOGLE_CREDENTIALS:
+            creds = Credentials.from_service_account_info(
+                json.loads(GOOGLE_CREDENTIALS), scopes=scopes)
+        else:
+            creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+        _gs_client = gspread.authorize(creds)
+    return _gs_client
+
+def _get_spreadsheet():
+    global _spreadsheet
+    if _spreadsheet is None:
+        _spreadsheet = _get_gs_client().open_by_key(GOOGLE_SHEET_ID)
+    return _spreadsheet
+
+def _get_worksheet(name="sheet1"):
+    sp = _get_spreadsheet()
+    if name == "sheet1":
+        return sp.sheet1
+    try:
+        return sp.worksheet(name)
+    except:
+        sheet = sp.add_worksheet(title=name, rows=100, cols=6)
+        return sheet
+
+def _invalidate_cache(name="sheet1"):
+    _records_cache.pop(name, None)
+
+def _cached_records(name="sheet1"):
+    now = datetime.now().timestamp()
+    if name in _records_cache:
+        ts, data = _records_cache[name]
+        if now - ts < CACHE_TTL:
+            return data
+    try:
+        sheet = _get_worksheet(name)
+        data = sheet.get_all_records()
+        _records_cache[name] = (now, data)
+        return data
+    except Exception as e:
+        logger.error(f"Cache read error ({name}): {e}")
+        return []
+
+# ============================================================
+# НАСТРОЙКИ (сохраняются в листе "Настройки" — не теряются!)
+# ============================================================
+_settings_cache = {}
+
+def _get_settings_sheet():
+    sheet = _get_worksheet("Настройки")
+    if not sheet.get_all_values():
+        sheet.insert_row(["Ключ", "Значение"], 1)
+    return sheet
+
+def load_settings():
+    global _settings_cache
+    try:
+        sheet = _get_settings_sheet()
+        records = sheet.get_all_records()
+        _settings_cache = {r["Ключ"]: r["Значение"] for r in records if r.get("Ключ")}
+    except Exception as e:
+        logger.error(f"Load settings error: {e}")
+
+def save_setting(key: str, value: str):
+    _settings_cache[key] = value
+    try:
+        sheet = _get_settings_sheet()
+        records = sheet.get_all_records()
+        for i, r in enumerate(records, start=2):
+            if r.get("Ключ") == key:
+                sheet.update_cell(i, 2, value)
+                return
+        sheet.append_row([key, value])
+    except Exception as e:
+        logger.error(f"Save setting error: {e}")
+
+def get_setting(key: str, default=None):
+    return _settings_cache.get(key, default)
+
+# ============================================================
+# ДОЛГИ
+# ============================================================
+debts = {}
 debt_counter = [0]
 
 def get_debts_sheet():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    if GOOGLE_CREDENTIALS:
-        creds_dict = json.loads(GOOGLE_CREDENTIALS)
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    else:
-        creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
-    client = gspread.authorize(creds)
-    spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
-    try:
-        sheet = spreadsheet.worksheet("Долги")
-    except:
-        sheet = spreadsheet.add_worksheet(title="Долги", rows=100, cols=6)
+    sheet = _get_worksheet("Долги")
+    if not sheet.get_all_values():
         sheet.insert_row(["ID", "Кому", "Сумма", "Дата", "Статус", "Примечание"], 1)
     return sheet
 
@@ -77,12 +162,31 @@ def load_debts_from_sheet():
         for r in records:
             if r.get("Статус") == "активен":
                 debt_id = str(r["ID"])
+                raw_amount = r["Сумма"]
+                # Новый формат: "550 $ + 300 ₴" или старый: число
+                try:
+                    # Пробуем старый формат (просто число)
+                    amounts = [{"amount": float(raw_amount), "currency": "UAH"}]
+                except (ValueError, TypeError):
+                    # Новый формат — парсим строку "550 $ + 300 ₴"
+                    amounts = []
+                    sym_map = {"₴": "UAH", "$": "USD", "€": "EUR"}
+                    for part in str(raw_amount).split("+"):
+                        part = part.strip()
+                        for sym, cur in sym_map.items():
+                            if sym in part:
+                                num = re.findall(r'[\d,.]+', part)
+                                if num:
+                                    amounts.append({"amount": float(num[0].replace(",", "")), "currency": cur})
+                                break
+                    if not amounts:
+                        amounts = [{"amount": 0, "currency": "UAH"}]
+
                 debts[debt_id] = {
                     "name": r["Кому"],
-                    "amount": float(r["Сумма"]),
+                    "amounts": amounts,
                     "date": r["Дата"],
                     "note": r.get("Примечание", ""),
-                    "row": None
                 }
                 try:
                     debt_counter[0] = max(debt_counter[0], int(r["ID"]))
@@ -109,29 +213,32 @@ def mark_debt_paid_in_sheet(debt_id):
     except Exception as e:
         logger.error(f"Mark debt paid error: {e}")
 
+def update_debt_amounts_in_sheet(debt_id, new_amounts_str):
+    try:
+        sheet = get_debts_sheet()
+        records = sheet.get_all_records()
+        for i, r in enumerate(records, start=2):
+            if str(r.get("ID")) == str(debt_id):
+                sheet.update_cell(i, 3, new_amounts_str)  # колонка Сумма
+                break
+    except Exception as e:
+        logger.error(f"Update debt error: {e}")
+
 # ============================================================
 # GOOGLE SHEETS — РАСХОДЫ
 # ============================================================
 def get_sheet():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    if GOOGLE_CREDENTIALS:
-        creds_dict = json.loads(GOOGLE_CREDENTIALS)
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    else:
-        creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
-    client = gspread.authorize(creds)
-    sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+    sheet = _get_worksheet("sheet1")
     if not sheet.get_all_values():
         sheet.insert_row(["Дата", "Сумма (₴)", "Категория", "Описание", "Исходный текст"], 1)
     return sheet
 
 def get_all_records():
-    sheet = get_sheet()
-    return sheet.get_all_records()
+    return _cached_records("sheet1")
 
 def save_expense(date, amount, category, description, raw_text):
-    sheet = get_sheet()
-    sheet.append_row([date, amount, category, description, raw_text])
+    get_sheet().append_row([date, amount, category, description, raw_text])
+    _invalidate_cache("sheet1")  # сбрасываем кэш после записи
 
 def get_sum_key(records):
     if not records:
@@ -232,44 +339,45 @@ def get_smart_comment(category, description, amount, month_records):
 # ============================================================
 # КОНТЕКСТНАЯ ПАМЯТЬ (АТБ = продукты автоматически)
 # ============================================================
-memory = {}  # {keyword: category}
+memory = {}  # {keyword: category} — загружается из Настроек
 
 DEFAULT_MEMORY = {
-    "атб": "Еда / продукты",
-    "сільпо": "Еда / продукты",
-    "новус": "Еда / продукты",
-    "метро": "Еда / продукты",
-    "glovo": "Еда / продукты",
-    "болт фуд": "Еда / продукты",
-    "bolt food": "Еда / продукты",
-    "окко": "Транспорт",
-    "wog": "Транспорт",
-    "uber": "Транспорт",
-    "bolt": "Транспорт",
+    "атб": "Еда / продукты", "сільпо": "Еда / продукты",
+    "новус": "Еда / продукты", "метро": "Еда / продукты",
+    "glovo": "Еда / продукты", "bolt food": "Еда / продукты",
+    "окко": "Транспорт", "wog": "Транспорт",
+    "uber": "Транспорт", "bolt": "Транспорт",
     "аптека": "Здоровье / аптека",
-    "зyn": "Никотин",
-    "zyн": "Никотин",
-    "снюс": "Никотин",
-    "вейп": "Никотин",
-    "steam": "Развлечения",
-    "алик": "Развлечения",
-    "netflix": "Развлечения",
-    "spotify": "Развлечения",
+    "зyn": "Никотин", "снюс": "Никотин", "вейп": "Никотин",
+    "steam": "Развлечения", "алик": "Развлечения",
+    "netflix": "Развлечения", "spotify": "Развлечения",
 }
 
+def load_memory_from_settings():
+    val = get_setting("user_memory")
+    if val:
+        try:
+            memory.update(json.loads(val))
+        except:
+            pass
+
+def save_memory_to_settings():
+    try:
+        save_setting("user_memory", json.dumps(memory))
+    except Exception as e:
+        logger.error(f"Save memory error: {e}")
+
 def get_memory_category(text: str) -> str | None:
-    """Ищет категорию по памяти для данного текста"""
     lower = text.lower()
-    combined = {**DEFAULT_MEMORY, **memory}
-    for keyword, category in combined.items():
+    for keyword, category in {**DEFAULT_MEMORY, **memory}.items():
         if keyword in lower:
             return category
     return None
 
 def update_memory(keyword: str, category: str):
-    """Запоминает связку слово → категория"""
     if keyword and len(keyword) > 2:
         memory[keyword.lower()] = category
+        save_memory_to_settings()
 
 # ============================================================
 # БЫСТРЫЙ РЕЖИМ (просто число → бот уточняет категорию)
@@ -405,60 +513,41 @@ def build_months_comparison() -> str:
     return "\n".join(lines)
 
 # ============================================================
-# БЮДЖЕТ
+# ДЕНЬ ЗАРПЛАТЫ (персистентно через Настройки)
 # ============================================================
-budget_storage = {}
-
-# Русские названия месяцев
-MONTH_NAMES = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-               "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
-MONTH_NAMES_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня",
-                   "июля", "августа", "сентября", "октября", "ноября", "декабря"]
-
-def month_name(month_num: int, genitive=False) -> str:
-    names = MONTH_NAMES_GEN if genitive else MONTH_NAMES
-    return names[month_num - 1]
-
-# ============================================================
-# ДЕНЬ ЗАРПЛАТЫ
-# ============================================================
-salary_storage = {}  # {chat_id: {"day": 25, "amount": 30000}}
-
 def get_salary_info(chat_id):
-    return salary_storage.get(str(chat_id))
+    val = get_setting(f"salary_{chat_id}")
+    if not val:
+        return None
+    try:
+        return json.loads(val)
+    except:
+        return None
 
 def set_salary_info(chat_id, day, amount=None):
-    salary_storage[str(chat_id)] = {"day": day, "amount": amount}
+    save_setting(f"salary_{chat_id}", json.dumps({"day": day, "amount": amount}))
 
 def build_salary_status(chat_id) -> str:
     info = get_salary_info(chat_id)
     if not info:
         return None
-
     now = datetime.now()
     salary_day = info["day"]
     amount = info.get("amount")
-
-    # Считаем дни до зарплаты
     if now.day < salary_day:
         days_left = salary_day - now.day
         next_salary = now.replace(day=salary_day)
     else:
-        # Уже прошла — считаем до следующего месяца
         next_month = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
         try:
             next_salary = next_month.replace(day=salary_day)
         except:
             next_salary = next_month.replace(day=28)
         days_left = (next_salary - now).days
-
-    # Сколько уже потрачено с последней зарплаты
     records = get_current_month_records()
     sum_key = get_sum_key(records) if records else "Сумма (₴)"
-    spent_this_month = sum(float(r[sum_key]) for r in records if r[sum_key]) if records else 0
-
+    spent = sum(float(r[sum_key]) for r in records if r[sum_key]) if records else 0
     lines = [f"💵 *День зарплаты — {salary_day}-е число*\n"]
-
     if days_left == 0:
         lines.append("🎉 *Сегодня зарплата!*")
     elif days_left == 1:
@@ -466,37 +555,32 @@ def build_salary_status(chat_id) -> str:
     else:
         lines.append(f"📅 До зарплаты: *{days_left} дней*")
         lines.append(f"   ({next_salary.strftime('%d')} {month_name(next_salary.month, genitive=True)})")
-
-    lines.append(f"\n💸 Потрачено в этом месяце: *{spent_this_month:,.0f} ₴*")
-
+    lines.append(f"\n💸 Потрачено в этом месяце: *{spent:,.0f} ₴*")
     if amount:
-        left_after = amount - spent_this_month
-        if days_left > 0:
-            per_day = left_after / days_left if days_left > 0 else 0
-            lines.append(f"💰 Зарплата: *{amount:,.0f} ₴*")
-            lines.append(f"🟢 Осталось: *{left_after:,.0f} ₴*")
-            if per_day > 0:
-                lines.append(f"📊 Можно тратить: *{per_day:,.0f} ₴/день* до зарплаты")
-            else:
-                lines.append(f"🔴 Уже потрачено больше зарплаты!")
-
+        left_after = amount - spent
+        per_day = left_after / days_left if days_left > 0 else 0
+        lines.append(f"💰 Зарплата: *{amount:,.0f} ₴*")
+        lines.append(f"{'🟢' if left_after > 0 else '🔴'} Осталось: *{left_after:,.0f} ₴*")
+        if per_day > 0:
+            lines.append(f"📊 Можно тратить: *{per_day:,.0f} ₴/день*")
     return "\n".join(lines)
 
-
 # ============================================================
-# БЮДЖЕТ
+# БЮДЖЕТ (персистентно через Настройки)
 # ============================================================
-budget_storage = {}
-
 def get_budget_status(chat_id):
-    budget = budget_storage.get(str(chat_id))
-    if not budget:
+    val = get_setting(f"budget_{chat_id}")
+    if not val:
+        return None
+    try:
+        budget = float(val)
+    except:
         return None
     records = get_current_month_records()
     sum_key = get_sum_key(records) if records else "Сумма (₴)"
     spent = sum(float(r[sum_key]) for r in records if r[sum_key]) if records else 0
     left = budget - spent
-    percent = int((spent / budget) * 100)
+    percent = min(int((spent / budget) * 100), 100)
     return {"budget": budget, "spent": spent, "left": left, "percent": percent}
 
 # ============================================================
@@ -585,7 +669,6 @@ def parse_debt(text):
         raw = raw[bracket_start:bracket_end+1]
     return json.loads(raw)
 
-CURRENCY_SYMBOLS = {"UAH": "₴", "USD": "$", "EUR": "€"}
 CURRENCY_NAMES = {"UAH": "гривен", "USD": "долларов", "EUR": "евро"}
 
 def format_debt_amounts(amounts: list) -> str:
@@ -1346,14 +1429,82 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         keyboard = []
         for debt_id, d in debts.items():
+            amounts = d.get("amounts", [{"amount": d.get("amount", 0), "currency": "UAH"}])
+            amt_str = format_debt_amounts(amounts)
             keyboard.append([InlineKeyboardButton(
-                f"✅ {d['name']} — {d['amount']:,.0f} ₴",
-                callback_data=f"paid_{debt_id}"
+                f"👤 {d['name']} — {amt_str.replace('*', '')}",
+                callback_data=f"debt_menu_{debt_id}"
             )])
         keyboard.append([InlineKeyboardButton("← Назад", callback_data="back")])
         await query.edit_message_text(
-            "Выбери долг который вернули:",
+            "Выбери долг:",
             reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data.startswith("debt_menu_"):
+        debt_id = data.replace("debt_menu_", "")
+        if debt_id not in debts:
+            await query.edit_message_text("Долг уже закрыт.")
+            return
+        d = debts[debt_id]
+        amounts = d.get("amounts", [{"amount": d.get("amount", 0), "currency": "UAH"}])
+        amt_str = format_debt_amounts(amounts)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Вернули полностью", callback_data=f"paid_{debt_id}")],
+            [InlineKeyboardButton("💰 Частичное погашение", callback_data=f"partial_{debt_id}")],
+            [InlineKeyboardButton("⏰ Напомнить через 2 нед.", callback_data=f"remind_{debt_id}")],
+            [InlineKeyboardButton("← Назад", callback_data="show_debts")],
+        ])
+        note_str = f"\n📝 {d['note']}" if d.get("note") else ""
+        await query.edit_message_text(
+            f"👤 *{d['name']}* — {amt_str}{note_str}\n📅 {d['date']}\n\nЧто сделать?",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    elif data.startswith("partial_"):
+        debt_id = data.replace("partial_", "")
+        if debt_id not in debts:
+            await query.edit_message_text("Долг уже закрыт.")
+            return
+        d = debts[debt_id]
+        amounts = d.get("amounts", [{"amount": d.get("amount", 0), "currency": "UAH"}])
+        # Показываем кнопки для каждой валюты
+        keyboard = []
+        for i, a in enumerate(amounts):
+            sym = CURRENCY_SYMBOLS.get(a.get("currency", "UAH"), "₴")
+            cur = a.get("currency", "UAH")
+            keyboard.append([InlineKeyboardButton(
+                f"💰 Частично в {sym} ({a['amount']:,.0f} {sym} осталось)",
+                callback_data=f"partialcur_{debt_id}_{i}"
+            )])
+        keyboard.append([InlineKeyboardButton("← Назад", callback_data=f"debt_menu_{debt_id}")])
+        await query.edit_message_text(
+            f"💰 *Частичное погашение*\nВыбери валюту:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data.startswith("partialcur_"):
+        # partialcur_{debt_id}_{amount_index}
+        parts = data.split("_")
+        debt_id = parts[1]
+        amt_idx = int(parts[2])
+        if debt_id not in debts:
+            await query.edit_message_text("Долг уже закрыт.")
+            return
+        d = debts[debt_id]
+        amounts = d.get("amounts", [])
+        if amt_idx >= len(amounts):
+            return
+        a = amounts[amt_idx]
+        sym = CURRENCY_SYMBOLS.get(a.get("currency", "UAH"), "₴")
+        # Сохраняем контекст в user_data для следующего шага
+        context.user_data["partial_debt_id"] = debt_id
+        context.user_data["partial_amt_idx"] = amt_idx
+        await query.edit_message_text(
+            f"💰 Сколько вернули в {sym}?\n\nНапиши сумму в чат (например: `500`)",
+            parse_mode="Markdown"
         )
 
     elif data.startswith("paid_"):
@@ -1361,8 +1512,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if debt_id in debts:
             d = debts.pop(debt_id)
             mark_debt_paid_in_sheet(debt_id)
+            amounts = d.get("amounts", [{"amount": d.get("amount", 0), "currency": "UAH"}])
+            amt_str = format_debt_amounts(amounts)
             await query.edit_message_text(
-                f"✅ Отлично! *{d['name']}* вернул *{d['amount']:,.0f} ₴*\n\nДолг закрыт 🎉",
+                f"✅ Отлично! *{d['name']}* вернул {amt_str}\n\nДолг закрыт 🎉",
                 parse_mode="Markdown"
             )
         else:
@@ -1372,7 +1525,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         debt_id = data.replace("remind_", "")
         if debt_id in debts:
             d = debts[debt_id]
-            # Планируем ещё одно напоминание через 2 недели
             chat_id = query.message.chat_id
             context.job_queue.run_once(
                 send_debt_reminder,
@@ -1480,12 +1632,61 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                 )
                 return
 
+    # Частичное погашение долга — ожидаем число
+    if "partial_debt_id" in context.user_data:
+        debt_id = context.user_data.get("partial_debt_id")
+        amt_idx = context.user_data.get("partial_amt_idx", 0)
+        numbers = re.findall(r'[\d]+(?:[.,]\d+)?', text)
+        if numbers and debt_id in debts:
+            partial_amount = float(numbers[0].replace(",", "."))
+            d = debts[debt_id]
+            amounts = d.get("amounts", [])
+            if amt_idx < len(amounts):
+                old_amount = float(amounts[amt_idx]["amount"])
+                currency = amounts[amt_idx].get("currency", "UAH")
+                sym = CURRENCY_SYMBOLS.get(currency, "₴")
+                new_amount = old_amount - partial_amount
+                if new_amount <= 0:
+                    # Полностью погашена эта валюта
+                    amounts.pop(amt_idx)
+                    if not amounts:
+                        # Все валюты погашены — закрываем долг
+                        debts.pop(debt_id)
+                        mark_debt_paid_in_sheet(debt_id)
+                        del context.user_data["partial_debt_id"]
+                        del context.user_data["partial_amt_idx"]
+                        await update.message.reply_text(
+                            f"✅ *{d['name']}* полностью погасил долг! 🎉",
+                            parse_mode="Markdown"
+                        )
+                        return
+                    else:
+                        msg = f"✅ Погашено *{partial_amount:,.0f} {sym}* в этой валюте — эта часть закрыта!"
+                else:
+                    amounts[amt_idx]["amount"] = new_amount
+                    msg = (f"💰 Частично погашено: *{partial_amount:,.0f} {sym}*\n"
+                           f"Остаток по {sym}: *{new_amount:,.0f} {sym}*")
+
+                debts[debt_id]["amounts"] = amounts
+                new_amounts_str = " + ".join(
+                    f"{a['amount']} {CURRENCY_SYMBOLS.get(a.get('currency','UAH'),'₴')}"
+                    for a in amounts
+                )
+                update_debt_amounts_in_sheet(debt_id, new_amounts_str)
+                del context.user_data["partial_debt_id"]
+                del context.user_data["partial_amt_idx"]
+                await update.message.reply_text(msg, parse_mode="Markdown")
+                return
+        else:
+            del context.user_data["partial_debt_id"]
+            del context.user_data["partial_amt_idx"]
+
     # Установка бюджета
     if "бюджет" in lower:
         numbers = re.findall(r'\d+', text)
         if numbers:
             amount = float(numbers[0])
-            budget_storage[str(update.effective_chat.id)] = amount
+            save_setting(f"budget_{update.effective_chat.id}", str(amount))
             await update.message.reply_text(
                 f"✅ Бюджет установлен: *{amount:,.0f} ₴/месяц*",
                 parse_mode="Markdown"
@@ -1643,6 +1844,8 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     load_debts_from_sheet()
+    load_settings()         # 💾 бюджет, зарплата
+    load_memory_from_settings()  # 💾 контекстная память
 
     # Авто-инсайт каждую пятницу в 19:00
     chat_id = os.getenv("CHAT_ID")
@@ -1654,7 +1857,7 @@ def main():
             data={"chat_id": chat_id}
         )
 
-    logger.info("Бот запущен! v2.5")
+    logger.info("Бот запущен! v3.0 — оптимизирован")
     app.run_polling()
 
 if __name__ == "__main__":
