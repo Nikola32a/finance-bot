@@ -303,40 +303,44 @@ async def handle_quick_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 # ============================================================
 def get_smart_warnings(chat_id) -> list:
     """Анализирует темп трат и выдаёт предупреждения"""
-    warnings = []
-    records = get_current_month_records()
-    if not records:
+    try:
+        warnings = []
+        records = get_current_month_records()
+        if not records:
+            return warnings
+
+        stats = analyze_records(records)
+        now = datetime.now()
+        days_passed = now.day
+        days_in_month = 30
+        if days_passed == 0:
+            return warnings
+        daily_avg = stats["total"] / days_passed
+        projected = daily_avg * days_in_month
+
+        prev_month = (now.replace(day=1) - timedelta(days=1))
+        all_records = get_all_records()
+        prev_records = [r for r in all_records if _record_in_month(r, prev_month.month, prev_month.year)]
+        if prev_records:
+            prev_stats = analyze_records(prev_records)
+            if prev_stats and prev_stats["total"] > 0:
+                diff_pct = int(((projected - prev_stats["total"]) / prev_stats["total"]) * 100)
+                if diff_pct > 20:
+                    warnings.append(f"🚨 Идёшь к перерасходу *+{diff_pct}%* vs прошлый месяц")
+                elif diff_pct > 10:
+                    warnings.append(f"⚠️ Темп трат выше прошлого месяца на *{diff_pct}%*")
+
+        budget_status = get_budget_status(chat_id)
+        if budget_status:
+            pct = budget_status["percent"]
+            days_percent = int((days_passed / days_in_month) * 100)
+            if pct > days_percent + 15:
+                warnings.append(f"🚨 Потрачено *{pct}%* бюджета за *{days_percent}%* месяца!")
+
         return warnings
-
-    stats = analyze_records(records)
-    now = datetime.now()
-    days_passed = now.day
-    days_in_month = 30
-    daily_avg = stats["total"] / days_passed
-    projected = daily_avg * days_in_month
-
-    # Предупреждение по темпу относительно прошлого месяца
-    prev_month = (now.replace(day=1) - timedelta(days=1))
-    all_records = get_all_records()
-    prev_records = [r for r in all_records if _record_in_month(r, prev_month.month, prev_month.year)]
-    if prev_records:
-        prev_stats = analyze_records(prev_records)
-        if prev_stats and prev_stats["total"] > 0:
-            diff_pct = int(((projected - prev_stats["total"]) / prev_stats["total"]) * 100)
-            if diff_pct > 20:
-                warnings.append(f"🚨 Идёшь к перерасходу *+{diff_pct}%* vs прошлый месяц")
-            elif diff_pct > 10:
-                warnings.append(f"⚠️ Темп трат выше прошлого месяца на *{diff_pct}%*")
-
-    # Предупреждение по бюджету
-    budget_status = get_budget_status(chat_id)
-    if budget_status:
-        pct = budget_status["percent"]
-        days_percent = int((days_passed / days_in_month) * 100)
-        if pct > days_percent + 15:
-            warnings.append(f"🚨 Потрачено *{pct}%* бюджета за *{days_percent}%* месяца!")
-
-    return warnings
+    except Exception as e:
+        logger.error(f"Smart warnings error: {e}")
+        return []
 
 # ============================================================
 # СРАВНЕНИЕ МЕСЯЦЕВ
@@ -1175,25 +1179,99 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("menu_"):
         action = data.replace("menu_", "")
         await query.answer()
-        fake_update = update
-        if action == "stats":
-            await stats_command(fake_update, context)
-        elif action == "budget":
-            await budget_command(fake_update, context)
-        elif action == "salary":
-            await salary_command(fake_update, context)
-        elif action == "compare":
-            await compare_command(fake_update, context)
-        elif action == "week":
-            await weekly_report_command(fake_update, context)
-        elif action == "month":
-            await monthly_report_command(fake_update, context)
-        elif action == "past":
-            await past_self_command(fake_update, context)
-        elif action == "habits":
-            await habits_command(fake_update, context)
-        elif action == "advice":
-            await advice_command(fake_update, context)
+        chat_id = query.message.chat_id
+
+        async def send(text, **kwargs):
+            await context.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+
+        try:
+            if action == "stats":
+                records = get_current_month_records()
+                if not records:
+                    await send("📭 В этом месяце ещё нет записей.")
+                    return
+                stats = analyze_records(records)
+                now = datetime.now()
+                daily_avg = stats["total"] / now.day if now.day > 0 else 0
+                projected = daily_avg * 30
+                lines = [f"📊 *Статистика за {month_name(now.month)}* ({stats['count']} записей)\n"]
+                for cat, amt in sorted(stats["by_category"].items(), key=lambda x: -x[1]):
+                    pct = int((amt / stats["total"]) * 100)
+                    lines.append(f"{EMOJI_MAP.get(cat, '📦')} {cat}: *{amt:,.0f} ₴* ({pct}%)")
+                lines.append(f"\n💰 *Итого: {stats['total']:,.0f} ₴*")
+                lines.append(f"📈 Прогноз на месяц: *~{projected:,.0f} ₴*")
+                budget_status = get_budget_status(chat_id)
+                if budget_status:
+                    pct = budget_status["percent"]
+                    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                    lines.append(f"\n💰 Бюджет: [{bar}] {pct}%")
+                    lines.append(f"Осталось: *{budget_status['left']:,.0f} ₴*")
+                await send("\n".join(lines), parse_mode="Markdown")
+
+            elif action == "budget":
+                budget_status = get_budget_status(chat_id)
+                if not budget_status:
+                    await send("💰 Бюджет не установлен.\n\nНапиши: «Бюджет 20000»")
+                    return
+                pct = budget_status["percent"]
+                bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+                status = "🟢" if pct < 70 else "🟡" if pct < 90 else "🔴"
+                await send(
+                    f"💰 *Бюджет на месяц*\n\n{status} [{bar}] *{pct}%*\n\n"
+                    f"Бюджет: *{budget_status['budget']:,.0f} ₴*\n"
+                    f"Потрачено: *{budget_status['spent']:,.0f} ₴*\n"
+                    f"Осталось: *{budget_status['left']:,.0f} ₴*",
+                    parse_mode="Markdown"
+                )
+
+            elif action == "salary":
+                status = build_salary_status(chat_id)
+                if not status:
+                    await send(
+                        "💵 *День зарплаты не установлен*\n\n"
+                        "Напиши:\n• «Зарплата 25» — только день\n"
+                        "• «Зарплата 25 числа 35000» — день и сумма"
+                    )
+                else:
+                    await send(status, parse_mode="Markdown")
+
+            elif action == "compare":
+                await send("⏳ Сравниваю месяцы...")
+                await send(build_months_comparison(), parse_mode="Markdown")
+
+            elif action == "week":
+                await send("⏳ Формирую отчёт...")
+                await send(build_weekly_report(), parse_mode="Markdown")
+
+            elif action == "month":
+                await send("⏳ Формирую отчёт...")
+                await send(build_monthly_report(), parse_mode="Markdown")
+
+            elif action == "past":
+                await send("⏳ Анализирую твою историю...")
+                await send(build_past_self_comparison(), parse_mode="Markdown")
+
+            elif action == "habits":
+                await send("⏳ Считаю стоимость привычек...")
+                await send(build_habit_cost_analysis(), parse_mode="Markdown")
+
+            elif action == "advice":
+                await send("⏳ Анализирую твои траты...")
+                records = get_current_month_records()
+                advice = generate_advice(records)
+                insight = build_weekly_insight()
+                msg = ""
+                if advice:
+                    msg += advice
+                if insight:
+                    msg += f"\n\n{insight}"
+                if not msg:
+                    msg = "📭 Пока недостаточно данных для советов."
+                await send(msg, parse_mode="Markdown")
+
+        except Exception as e:
+            logger.error(f"Menu callback error: {e}")
+            await send("❌ Ошибка. Попробуй ещё раз.")
         return
 
     if data.startswith("quick_"):
