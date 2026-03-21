@@ -1,27 +1,24 @@
-
 import os
 import logging
 import tempfile
 import json
 from datetime import datetime
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
 from groq import Groq
 import google.generativeai as genai
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ============================================================
-# НАСТРОЙКИ
-# ============================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 genai.configure(api_key=GEMINI_API_KEY)
@@ -32,23 +29,25 @@ logger = logging.getLogger(__name__)
 
 CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Другое"]
 
-# ============================================================
-# GOOGLE SHEETS
-# ============================================================
+
 def get_sheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    import json as json_lib
-creds_dict = json_lib.loads(os.getenv("GOOGLE_CREDENTIALS"))
-creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    if GOOGLE_CREDENTIALS:
+        creds_dict = json.loads(GOOGLE_CREDENTIALS)
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    else:
+        creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
     client = gspread.authorize(creds)
     sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
     if not sheet.get_all_values():
         sheet.insert_row(["Дата", "Сумма (₽)", "Категория", "Описание", "Исходный текст"], 1)
     return sheet
 
+
 def save_expense(date, amount, category, description, raw_text):
     sheet = get_sheet()
     sheet.append_row([date, amount, category, description, raw_text])
+
 
 def get_stats():
     sheet = get_sheet()
@@ -63,9 +62,7 @@ def get_stats():
         by_category[cat] = by_category.get(cat, 0) + amt
     return {"total": total, "by_category": by_category, "count": len(records)}
 
-# ============================================================
-# РАСПОЗНАВАНИЕ РЕЧИ — Groq Whisper (бесплатно)
-# ============================================================
+
 def transcribe_audio(file_path: str) -> str:
     with open(file_path, "rb") as audio_file:
         transcript = groq_client.audio.transcriptions.create(
@@ -75,9 +72,7 @@ def transcribe_audio(file_path: str) -> str:
         )
     return transcript.text
 
-# ============================================================
-# ПАРСИНГ ТРАТЫ — Gemini Flash (бесплатно)
-# ============================================================
+
 def parse_expense(text: str) -> dict:
     prompt = f"""Ты помощник по финансовому учёту. Из текста извлеки информацию о трате.
 
@@ -97,9 +92,7 @@ def parse_expense(text: str) -> dict:
     raw = response.text.strip().replace("```json", "").replace("```", "").strip()
     return json.loads(raw)
 
-# ============================================================
-# TELEGRAM HANDLERS
-# ============================================================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[KeyboardButton("📊 Статистика"), KeyboardButton("❓ Помощь")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -114,6 +107,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -130,6 +124,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📦 Другое",
         parse_mode="Markdown"
     )
+
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Загружаю статистику...")
@@ -152,6 +147,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Stats error: {e}")
         await update.message.reply_text("❌ Ошибка при загрузке статистики.")
 
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎙 Распознаю голосовое...")
     try:
@@ -168,6 +164,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Voice error: {e}")
         await update.message.reply_text("❌ Не удалось распознать голосовое. Попробуй ещё раз.")
 
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "📊 Статистика":
@@ -177,6 +174,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await help_command(update, context)
         return
     await process_expense_text(update, text)
+
 
 async def process_expense_text(update: Update, text: str):
     try:
@@ -208,9 +206,7 @@ async def process_expense_text(update: Update, text: str):
         logger.error(f"Process error: {e}")
         await update.message.reply_text("❌ Ошибка при сохранении. Попробуй ещё раз.")
 
-# ============================================================
-# ЗАПУСК
-# ============================================================
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -220,6 +216,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     logger.info("Бот запущен! (бесплатная версия)")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
