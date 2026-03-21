@@ -822,10 +822,8 @@ async def send_weekly_insight(context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [KeyboardButton("📊 Статистика"), KeyboardButton("📅 Отчёт за неделю")],
-        [KeyboardButton("📆 Отчёт за месяц"), KeyboardButton("💰 Бюджет")],
-        [KeyboardButton("💸 Долги"), KeyboardButton("💡 Советы")],
-        [KeyboardButton("📊 Сравнение месяцев"), KeyboardButton("💵 Зарплата")]
+        [KeyboardButton("💰 Финансы"), KeyboardButton("📊 Аналитика")],
+        [KeyboardButton("💸 Долги"), KeyboardButton("⚙️ Прочее")]
     ]
     await update.message.reply_text(
         "👋 Привет! Я твой финансовый аналитик.\n\n"
@@ -833,10 +831,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• «Снюс 800»\n"
         "• «Мойка 350, бензин 1200, кофе 90»\n\n"
         "💸 *Как записать долг:*\n"
-        "• «Дал в долг Саше 500»\n"
-        "• «Одолжил Васе 1200 на телефон»\n\n"
+        "• «Дал в долг Саше 500»\n\n"
         "💰 *Установить бюджет:*\n"
-        "• «Бюджет 20000»",
+        "• «Бюджет 20000»\n\n"
+        "👇 *Используй меню:*\n"
+        "💰 Финансы — статистика, бюджет, зарплата\n"
+        "📊 Аналитика — отчёты, советы, сравнения\n"
+        "💸 Долги — кому дал, напоминания\n"
+        "⚙️ Прочее — привычки, прошлое я",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
@@ -943,6 +945,200 @@ async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Compare error: {e}")
         await update.message.reply_text("❌ Ошибка при сравнении.")
 
+
+# ============================================================
+# СРАВНЕНИЕ С ПРОШЛЫМ "Я"
+# ============================================================
+def build_past_self_comparison() -> str:
+    all_records = get_all_records()
+    now = datetime.now()
+
+    def get_month_stats(months_ago):
+        target = now.replace(day=1)
+        for _ in range(months_ago):
+            target = (target - timedelta(days=1)).replace(day=1)
+        recs = [r for r in all_records if _record_in_month(r, target.month, target.year)]
+        return analyze_records(recs) if recs else None, target
+
+    cur_stats = analyze_records(get_current_month_records())
+    stats_1, date_1 = get_month_stats(1)
+    stats_2, date_2 = get_month_stats(2)
+    stats_3, date_3 = get_month_stats(3)
+
+    if not cur_stats:
+        return "📭 Недостаточно данных для сравнения."
+
+    lines = ["🪞 *Сравнение с прошлым «я»*\n"]
+    cur_total = cur_stats["total"]
+
+    comparisons = [
+        (stats_1, date_1, "1 месяц назад"),
+        (stats_2, date_2, "2 месяца назад"),
+        (stats_3, date_3, "3 месяца назад"),
+    ]
+
+    has_data = False
+    for stats, date, label in comparisons:
+        if not stats or stats["total"] == 0:
+            continue
+        has_data = True
+        diff = cur_total - stats["total"]
+        diff_pct = int((diff / stats["total"]) * 100)
+        arrow = "📈" if diff > 0 else "📉"
+        sign = "+" if diff > 0 else ""
+        verdict = "больше" if diff > 0 else "меньше"
+        lines.append(
+            f"{arrow} *{label}* ({month_name(date.month)}):\n"
+            f"   {sign}{diff_pct}% — тратишь на *{abs(diff):,.0f} ₴ {verdict}*"
+        )
+
+    if not has_data:
+        return "📭 Нужно минимум 2 месяца данных."
+
+    # Сравнение по категориям с самым давним месяцем
+    oldest_stats = None
+    for stats, date, label in reversed(comparisons):
+        if stats:
+            oldest_stats = (stats, date, label)
+            break
+
+    if oldest_stats:
+        stats, date, label = oldest_stats
+        lines.append(f"\n📊 *Изменения по категориям vs {label}:*")
+        for cat in CATEGORIES:
+            cur_amt = cur_stats["by_category"].get(cat, 0)
+            old_amt = stats["by_category"].get(cat, 0)
+            if old_amt == 0 and cur_amt == 0:
+                continue
+            diff = cur_amt - old_amt
+            if abs(diff) < 100:
+                continue
+            emoji = EMOJI_MAP.get(cat, "📦")
+            sign = "+" if diff > 0 else ""
+            arrow = "📈" if diff > 0 else "📉"
+            lines.append(f"{emoji} {cat}: {arrow} {sign}{diff:,.0f} ₴")
+
+    # Итоговый вывод
+    if stats_2 and stats_2["total"] > 0:
+        long_diff_pct = int(((cur_total - stats_2["total"]) / stats_2["total"]) * 100)
+        if long_diff_pct <= -15:
+            lines.append(f"\n🏆 *Ты стал тратить на {abs(long_diff_pct)}% меньше, чем 2 месяца назад! Отличный прогресс!*")
+        elif long_diff_pct >= 20:
+            lines.append(f"\n⚠️ *Траты выросли на {long_diff_pct}% за 2 месяца — стоит разобраться почему*")
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# АНАЛИЗ СТОИМОСТИ ПРИВЫЧЕК
+# ============================================================
+
+# Что можно купить за разные суммы
+EQUIVALENTS = [
+    (2000,   "🍕 100 пицц"),
+    (3000,   "🎮 3 новые игры в Steam"),
+    (5000,   "✈️ билет в Европу"),
+    (8000,   "📱 бюджетный смартфон"),
+    (15000,  "💻 неплохой ноутбук"),
+    (25000,  "📱 iPhone"),
+    (40000,  "🏖 неделя на море на двоих"),
+    (60000,  "🚗 первый взнос на авто"),
+    (100000, "🌍 отпуск мечты за границей"),
+]
+
+def get_equivalent(amount: float) -> str:
+    best = None
+    for threshold, label in EQUIVALENTS:
+        if amount >= threshold * 0.7:
+            best = label
+    return best
+
+def build_habit_cost_analysis() -> str:
+    all_records = get_all_records()
+    now = datetime.now()
+
+    # Берём последние 3 месяца для среднего
+    months_data = defaultdict(list)
+    for r in all_records:
+        try:
+            date = datetime.strptime(r.get("Дата", "")[:10], "%d.%m.%Y")
+            months_data[(date.year, date.month)].append(r)
+        except:
+            continue
+
+    if len(months_data) < 1:
+        return "📭 Недостаточно данных."
+
+    # Среднемесячные траты по описаниям
+    desc_totals = defaultdict(lambda: {"total": 0.0, "count": 0, "months": set()})
+    for (year, month), records in months_data.items():
+        sum_key = get_sum_key(records)
+        for r in records:
+            desc = r.get("Описание", "").lower().strip()
+            amt = float(r[sum_key]) if r[sum_key] else 0
+            if desc and amt > 0:
+                desc_totals[desc]["total"] += amt
+                desc_totals[desc]["count"] += 1
+                desc_totals[desc]["months"].add((year, month))
+
+    num_months = max(len(months_data), 1)
+
+    # Находим повторяющиеся привычки (минимум в 2 месяцах)
+    habits = {
+        k: v for k, v in desc_totals.items()
+        if len(v["months"]) >= 2 and v["total"] / num_months >= 200
+    }
+
+    if not habits:
+        return "📭 Пока недостаточно повторяющихся трат для анализа.\nЗаписывай траты ещё несколько недель!"
+
+    lines = ["💸 *Анализ стоимости привычек*\n"]
+    lines.append(f"_За {num_months} мес. данных_\n")
+
+    sorted_habits = sorted(habits.items(), key=lambda x: -x[1]["total"])[:6]
+
+    for desc, data in sorted_habits:
+        monthly_avg = data["total"] / num_months
+        annual = monthly_avg * 12
+        equiv = get_equivalent(annual)
+
+        lines.append(f"*{desc.capitalize()}*")
+        lines.append(f"  📅 В месяц: *{monthly_avg:,.0f} ₴*")
+        lines.append(f"  📆 В год: *{annual:,.0f} ₴*")
+        if equiv:
+            lines.append(f"  💡 Это = {equiv}")
+        lines.append("")
+
+    # Топ привычка
+    if sorted_habits:
+        top_desc, top_data = sorted_habits[0]
+        top_annual = (top_data["total"] / num_months) * 12
+        equiv = get_equivalent(top_annual)
+        if equiv:
+            lines.append(f"🏆 *Самая дорогая привычка — «{top_desc}»*")
+            lines.append(f"За год уходит *{top_annual:,.0f} ₴* — это {equiv}")
+
+    return "\n".join(lines)
+
+
+async def past_self_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Анализирую твою историю...")
+    try:
+        await update.message.reply_text(build_past_self_comparison(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Past self error: {e}")
+        await update.message.reply_text("❌ Ошибка при анализе.")
+
+
+async def habits_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Считаю стоимость привычек...")
+    try:
+        await update.message.reply_text(build_habit_cost_analysis(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Habits error: {e}")
+        await update.message.reply_text("❌ Ошибка при анализе привычек.")
+
+
 async def advice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Анализирую твои траты...")
     try:
@@ -975,6 +1171,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    if data.startswith("menu_"):
+        action = data.replace("menu_", "")
+        await query.answer()
+        fake_update = update
+        if action == "stats":
+            await stats_command(fake_update, context)
+        elif action == "budget":
+            await budget_command(fake_update, context)
+        elif action == "salary":
+            await salary_command(fake_update, context)
+        elif action == "compare":
+            await compare_command(fake_update, context)
+        elif action == "week":
+            await weekly_report_command(fake_update, context)
+        elif action == "month":
+            await monthly_report_command(fake_update, context)
+        elif action == "past":
+            await past_self_command(fake_update, context)
+        elif action == "habits":
+            await habits_command(fake_update, context)
+        elif action == "advice":
+            await advice_command(fake_update, context)
+        return
 
     if data.startswith("quick_"):
         parts = data.split("_", 2)
@@ -1067,10 +1287,45 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await budget_command(update, context); return
     if text == "💵 Зарплата":
         await salary_command(update, context); return
+    if text == "🪞 Прошлое я":
+        await past_self_command(update, context); return
+    if text == "💸 Привычки":
+        await habits_command(update, context); return
     if text == "📊 Сравнение месяцев":
         await compare_command(update, context); return
     if text == "💡 Советы":
         await advice_command(update, context); return
+    if text == "💰 Финансы":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Статистика", callback_data="menu_stats"),
+             InlineKeyboardButton("💰 Бюджет", callback_data="menu_budget")],
+            [InlineKeyboardButton("💵 Зарплата", callback_data="menu_salary"),
+             InlineKeyboardButton("📊 Сравнение", callback_data="menu_compare")],
+        ])
+        await update.message.reply_text("💰 *Финансы* — выбери:", parse_mode="Markdown", reply_markup=keyboard)
+        return
+
+    if text == "📊 Аналитика":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📅 Неделя", callback_data="menu_week"),
+             InlineKeyboardButton("📆 Месяц", callback_data="menu_month")],
+            [InlineKeyboardButton("🪞 Прошлое я", callback_data="menu_past"),
+             InlineKeyboardButton("💸 Привычки", callback_data="menu_habits")],
+            [InlineKeyboardButton("💡 Советы", callback_data="menu_advice")],
+        ])
+        await update.message.reply_text("📊 *Аналитика* — выбери:", parse_mode="Markdown", reply_markup=keyboard)
+        return
+
+    if text == "⚙️ Прочее":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💡 Советы", callback_data="menu_advice"),
+             InlineKeyboardButton("💵 Зарплата", callback_data="menu_salary")],
+            [InlineKeyboardButton("🪞 Прошлое я", callback_data="menu_past"),
+             InlineKeyboardButton("💸 Привычки", callback_data="menu_habits")],
+        ])
+        await update.message.reply_text("⚙️ *Прочее* — выбери:", parse_mode="Markdown", reply_markup=keyboard)
+        return
+
     if text == "💸 Долги":
         await debts_command(update, context); return
     await process_message(update, context, text)
@@ -1238,6 +1493,8 @@ def main():
     app.add_handler(CommandHandler("month", monthly_report_command))
     app.add_handler(CommandHandler("budget", budget_command))
     app.add_handler(CommandHandler("debts", debts_command))
+    app.add_handler(CommandHandler("past", past_self_command))
+    app.add_handler(CommandHandler("habits", habits_command))
     app.add_handler(CommandHandler("compare", compare_command))
     app.add_handler(CommandHandler("advice", advice_command))
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -1256,7 +1513,7 @@ def main():
             data={"chat_id": chat_id}
         )
 
-    logger.info("Бот запущен! v2.3")
+    logger.info("Бот запущен! v2.5")
     app.run_polling()
 
 if __name__ == "__main__":
