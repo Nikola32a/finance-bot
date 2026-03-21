@@ -96,7 +96,7 @@ def parse_expense(text: str) -> dict:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[KeyboardButton("📊 Статистика"), KeyboardButton("❓ Помощь")]]
+    keyboard = [[KeyboardButton("📊 Статистика")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
         "👋 Привет! Я твой *бесплатный* финансовый бот.\n\n"
@@ -111,21 +111,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  #  await update.message.reply_text(
-    #    "❓ *Помощь*\n\n"
-    #    "Говори или пиши о своих тратах:\n"
-     #   "• «Купил продукты на 1200»\n"
-     #   "• «Бензин 2500 рублей»\n"
-    #    "• «Кино с друзьями 800 р»\n\n"
+ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "❓ *Помощь*\n\n"
+        "Говори или пиши о своих тратах:\n"
+        "• «Купил продукты на 1200»\n"
+        "• «Бензин 2500 рублей»\n"
+        "• «Кино с друзьями 800 р»\n\n"
         "Категории:\n"
-       # "🍔 Еда / продукты\n"
-     #   "🚗 Транспорт\n"
-      #  "🎮 Развлечения\n"
-     #   "💊 Здоровье / аптека\n"
-     #   "📦 Другое",
-      #  parse_mode="Markdown"
- #   )
+        "🍔 Еда / продукты\n"
+        "🚗 Транспорт\n"
+        "🎮 Развлечения\n"
+        "💊 Здоровье / аптека\n"
+        "📦 Другое",
+        parse_mode="Markdown"
+    )
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
