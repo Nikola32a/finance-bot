@@ -34,6 +34,53 @@ EMOJI_MAP = {
     "Другое": "📦"
 }
 
+CATEGORY_RULES = """
+ПРАВИЛА КАТЕГОРИЙ (применяй строго):
+
+🍔 Еда / продукты:
+- Продукты, супермаркет, магазин, АТБ, Сільпо, Новус, Метро
+- Кафе, ресторан, фастфуд, McDonald's, KFC, Burger King, піца, суші
+- Доставка еды, Glovo, Bolt Food, завтрак, обед, ужин, перекус
+- Кофе, чай, напитки, вода, алкоголь, пиво, вино
+
+🚗 Транспорт:
+- Бензин, дизель, топливо, заправка, АЗС, ОККО, WOG, Shell
+- Мойка машины, автомойка, мийка, детейлінг
+- Запчасти, автозапчасти, масло, шины, колеса, аккумулятор, ремонт авто, СТО
+- Такси, Uber, Bolt, таксі
+- Автобус, маршрутка, метро, електричка, поезд, билет на транспорт
+- Парковка, штраф, страховка авто
+
+🎮 Развлечения:
+- Steam, игры, доната, донат в игру, кейсы, скины, CS, Dota
+- AliExpress, Алик, Алиэкспресс — покупки на маркетплейсах
+- Тема (подписка ВКонтакте или другие), подписки
+- Кино, кинотеатр, концерт, театр, клуб, бар
+- Netflix, Spotify, YouTube Premium, Apple Music, онлайн-кинотеатр
+- Книги, комиксы (для развлечения)
+- Боулинг, бильярд, квест, аттракцион, развлекательный центр
+- Ставки, казино, покер
+
+💊 Здоровье / аптека:
+- Аптека, лекарства, таблетки, витамины, БАД
+- Врач, стоматолог, клиника, анализы, обследование
+- Спортзал, фитнес, абонемент, тренировка
+- Массаж, косметолог, салон красоты, парикмахер, стрижка, маникюр
+
+🚬 Никотин:
+- Снюс, никотиновые пакетики, ZYN, Lyft
+- Сигареты, табак, папиросы
+- Вейп, под, жижа, картридж, испаритель, электронная сигарета
+- Кальян
+
+📦 Другое:
+- Одежда, обувь, аксессуары (если не для спорта)
+- Коммунальные услуги, свет, газ, вода, интернет, телефон
+- Подарки, цветы
+- Ремонт дома, строительные материалы, инструменты
+- Всё что не подходит под другие категории
+"""
+
 
 def get_sheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -59,11 +106,20 @@ def get_stats():
     records = sheet.get_all_records()
     if not records:
         return None
-    total = sum(float(r["Сумма (₴)"]) for r in records if r["Сумма (₴)"])
+    # Ищем колонку с суммой гибко
+    sum_key = None
+    for key in records[0].keys():
+        if "умма" in key or "сума" in key.lower():
+            sum_key = key
+            break
+    if not sum_key:
+        sum_key = list(records[0].keys())[1]
+
+    total = sum(float(r[sum_key]) for r in records if r[sum_key])
     by_category = {}
     for r in records:
-        cat = r["Категория"]
-        amt = float(r["Сумма (₴)"]) if r["Сумма (₴)"] else 0
+        cat = r.get("Категория", r.get("Категорія", "Другое"))
+        amt = float(r[sum_key]) if r[sum_key] else 0
         by_category[cat] = by_category.get(cat, 0) + amt
     return {"total": total, "by_category": by_category, "count": len(records)}
 
@@ -83,21 +139,19 @@ def parse_expenses(text: str) -> list:
 
 Текст: "{text}"
 
-Категории: {", ".join(CATEGORIES)}
+Доступные категории: {", ".join(CATEGORIES)}
 
-Верни ТОЛЬКО JSON массив без лишнего текста и без markdown-тиков. Даже если трата одна — верни массив с одним элементом:
+{CATEGORY_RULES}
+
+Верни ТОЛЬКО JSON массив без лишнего текста и без markdown-тиков. Даже если трата одна — верни массив:
 [
-  {{"amount": <число>, "category": "<одна из категорий>", "description": "<краткое описание 2-5 слов>"}},
   {{"amount": <число>, "category": "<одна из категорий>", "description": "<краткое описание 2-5 слов>"}}
 ]
 
 Правила:
-- amount: только число без знаков валюты, никогда не null
+- amount: только число без знаков валюты
 - Если сумма не указана — не включай эту трату
-- description: очень кратко суть покупки
-- Топливо, бензин, заправка, мойка машины, запчасти→ категория Транспорт
-- Аптека, лекарства → категория Здоровье / аптека
-- Снюс, сигареты, вейп → категория Никотин"""
+- description: очень кратко суть покупки на русском"""
 
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
@@ -117,12 +171,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[KeyboardButton("📊 Статистика")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "👋 Привет! Я твій *бесплатный* фінансовий бот.\n\n"
+        "👋 Привіт! Я твій фінансовий бот.\n\n"
         "🎙 *Як користуватись:*\n"
-        "Відправ голосове або напиши текстом — одну або кілька трат одразу:\n"
+        "Відправ голосове або напиши — одну або кілька витрат:\n"
         "• «Снюс 800»\n"
-        "• «Аптека 1400, топливо 650»\n"
-        "• «Продукти 320, таксі 180, кіно 250»\n\n"
+        "• «Мийка машини 350, бензин 1200»\n"
+        "• «Аптека 1400, Steam 500, продукти 320»\n\n"
         "📊 Натисни *Статистика* щоб побачити зведення.",
         parse_mode="Markdown",
         reply_markup=reply_markup
@@ -161,7 +215,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_expense_text(update, text)
     except Exception as e:
         logger.error(f"Voice error: {e}")
-        await update.message.reply_text("❌ Не вдалось розпізнати голосове. Спробуй ще раз.")
+        await update.message.reply_text("❌ Не вдалось розпізнати. Спробуй ще раз.")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
