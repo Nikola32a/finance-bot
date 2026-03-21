@@ -23,7 +23,16 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Другое"]
+CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Никотин", "Другое"]
+
+EMOJI_MAP = {
+    "Еда / продукты": "🍔",
+    "Транспорт": "🚗",
+    "Развлечения": "🎮",
+    "Здоровье / аптека": "💊",
+    "Никотин": "🚬",
+    "Другое": "📦"
+}
 
 
 def get_sheet():
@@ -69,89 +78,77 @@ def transcribe_audio(file_path: str) -> str:
     return transcript.text
 
 
-def parse_expense(text: str) -> dict:
-    prompt = f"""Ты помощник по финансовому учёту. Из текста извлеки информацию о трате.
+def parse_expenses(text: str) -> list:
+    prompt = f"""Ты помощник по финансовому учёту. Из текста извлеки ВСЕ траты — их может быть одна или несколько.
 
 Текст: "{text}"
 
 Категории: {", ".join(CATEGORIES)}
 
-Верни ТОЛЬКО JSON без лишнего текста и без markdown-тиков:
-{{"amount": <число или null>, "category": "<одна из категорий>", "description": "<краткое описание 2-5 слов>"}}
+Верни ТОЛЬКО JSON массив без лишнего текста и без markdown-тиков. Даже если трата одна — верни массив с одним элементом:
+[
+  {{"amount": <число>, "category": "<одна из категорий>", "description": "<краткое описание 2-5 слов>"}},
+  {{"amount": <число>, "category": "<одна из категорий>", "description": "<краткое описание 2-5 слов>"}}
+]
 
 Правила:
-- amount: только число без знаков валюты
-- Если сумма не упомянута — null
-- description: очень кратко суть покупки"""
+- amount: только число без знаков валюты, никогда не null
+- Если сумма не указана — не включай эту трату
+- description: очень кратко суть покупки
+- Топливо, бензин, заправка → категория Транспорт
+- Аптека, лекарства → категория Здоровье / аптека
+- Снюс, сигареты, вейп → категория Никотин"""
 
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=200,
+        max_tokens=500,
         temperature=0.1
     )
     raw = response.choices[0].message.content.strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
-    return json.loads(raw)
+    result = json.loads(raw)
+    if isinstance(result, dict):
+        result = [result]
+    return result
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[KeyboardButton("📊 Статистика")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "👋 Привет! Я твой *бесплатный* финансовый бот.\n\n"
-        "🎙 *Как пользоваться:*\n"
-        "Отправь голосовое сообщение или напиши текстом:\n"
-        "• «Потратил 350 рублей на обед»\n"
-        "• «Такси 280 рублей»\n"
-        "• «Аптека, купил витамины за 600»\n\n"
-        "📊 Нажми *Статистика* чтобы увидеть сводку.",
+        "👋 Привет! Я твій *бесплатный* фінансовий бот.\n\n"
+        "🎙 *Як користуватись:*\n"
+        "Відправ голосове або напиши текстом — одну або кілька трат одразу:\n"
+        "• «Снюс 800»\n"
+        "• «Аптека 1400, топливо 650»\n"
+        "• «Продукти 320, таксі 180, кіно 250»\n\n"
+        "📊 Натисни *Статистика* щоб побачити зведення.",
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "❓ *Помощь*\n\n"
-        "Говори или пиши о своих тратах:\n"
-        "• «Купил продукты на 1200»\n"
-        "• «Бензин 2500 рублей»\n"
-        "• «Кино с друзьями 800 р»\n\n"
-        "Категории:\n"
-        "🍔 Еда / продукты\n"
-        "🚗 Транспорт\n"
-        "🎮 Развлечения\n"
-        "💊 Здоровье / аптека\n"
-        "📦 Другое",
-        parse_mode="Markdown"
-    )
-
-
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Загружаю статистику...")
+    await update.message.reply_text("⏳ Завантажую статистику...")
     try:
         stats = get_stats()
         if not stats:
-            await update.message.reply_text("📭 Пока нет записей. Отправь голосовое о трате!")
+            await update.message.reply_text("📭 Поки немає записів. Відправ голосове про витрату!")
             return
-        emoji_map = {
-            "Еда / продукты": "🍔", "Транспорт": "🚗",
-            "Развлечения": "🎮", "Здоровье / аптека": "💊", "Другое": "📦"
-        }
-        lines = [f"📊 *Статистика трат* ({stats['count']} записей)\n"]
+        lines = [f"📊 *Статистика витрат* ({stats['count']} записів)\n"]
         for cat, amt in sorted(stats["by_category"].items(), key=lambda x: -x[1]):
-            emoji = emoji_map.get(cat, "📦")
+            emoji = EMOJI_MAP.get(cat, "📦")
             lines.append(f"{emoji} {cat}: *{amt:,.0f} ₴*")
-        lines.append(f"\n💰 *Итого: {stats['total']:,.0f} ₴*")
+        lines.append(f"\n💰 *Разом: {stats['total']:,.0f} ₴*")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Stats error: {e}")
-        await update.message.reply_text("❌ Ошибка при загрузке статистики.")
+        await update.message.reply_text("❌ Помилка при завантаженні статистики.")
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎙 Распознаю голосовое...")
+    await update.message.reply_text("🎙 Розпізнаю голосове...")
     try:
         voice = update.message.voice
         file = await context.bot.get_file(voice.file_id)
@@ -160,11 +157,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             tmp_path = tmp.name
         text = transcribe_audio(tmp_path)
         os.unlink(tmp_path)
-        await update.message.reply_text(f"📝 Распознал: _{text}_", parse_mode="Markdown")
+        await update.message.reply_text(f"📝 Розпізнав: _{text}_", parse_mode="Markdown")
         await process_expense_text(update, text)
     except Exception as e:
         logger.error(f"Voice error: {e}")
-        await update.message.reply_text("❌ Не удалось распознать голосовое. Попробуй ещё раз.")
+        await update.message.reply_text("❌ Не вдалось розпізнати голосове. Спробуй ще раз.")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -172,47 +169,45 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "📊 Статистика":
         await stats_command(update, context)
         return
-    if text == "❓ Помощь":
-        await help_command(update, context)
-        return
     await process_expense_text(update, text)
 
 
 async def process_expense_text(update: Update, text: str):
     try:
-        parsed = parse_expense(text)
-        if not parsed.get("amount"):
+        expenses = parse_expenses(text)
+
+        if not expenses:
             await update.message.reply_text(
-                "🤔 Не нашёл сумму в сообщении.\n"
-                "Попробуй: «Потратил 500 рублей на продукты»"
+                "🤔 Не знайшов суму в повідомленні.\n"
+                "Спробуй: «Снюс 800» або «Продукти 500, таксі 200»"
             )
             return
+
         date = datetime.now().strftime("%d.%m.%Y %H:%M")
-        amount = float(parsed["amount"])
-        category = parsed.get("category", "Другое")
-        description = parsed.get("description", "—")
-        save_expense(date, amount, category, description, text)
-        emoji_map = {
-            "Еда / продукты": "🍔", "Транспорт": "🚗",
-            "Развлечения": "🎮", "Здоровье / аптека": "💊", "Другое": "📦"
-        }
-        emoji = emoji_map.get(category, "📦")
-        await update.message.reply_text(
-            f"✅ *Записано!*\n\n"
-            f"{emoji} {category}\n"
-            f"💸 *{amount:,.0f} ₴*\n"
-            f"📌 {description}",
-            parse_mode="Markdown"
-        )
+        lines = ["✅ *Записано!*\n"]
+
+        for exp in expenses:
+            amount = float(exp["amount"])
+            category = exp.get("category", "Другое")
+            description = exp.get("description", "—")
+            save_expense(date, amount, category, description, text)
+            emoji = EMOJI_MAP.get(category, "📦")
+            lines.append(f"{emoji} {description} — *{amount:,.0f} ₴* ({category})")
+
+        if len(expenses) > 1:
+            total = sum(float(e["amount"]) for e in expenses)
+            lines.append(f"\n💰 *Разом: {total:,.0f} ₴*")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
     except Exception as e:
         logger.error(f"Process error: {e}")
-        await update.message.reply_text("❌ Ошибка при сохранении. Попробуй ещё раз.")
+        await update.message.reply_text("❌ Помилка при збереженні. Спробуй ще раз.")
 
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
