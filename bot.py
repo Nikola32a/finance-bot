@@ -551,40 +551,70 @@ def build_monthly_report():
 # ДОЛГИ
 # ============================================================
 def parse_debt(text):
-    """Парсит текст типа 'дал в долг Саше 500' или 'долг Вася 1200 за телефон'"""
-    prompt = f"""Из текста извлеки информацию о долге.
+    """Парсит текст с поддержкой нескольких валют: 'Артём 550 долларов и 300 гривен'"""
+    prompt = f"""Из текста извлеки информацию о долге. Может быть несколько сумм в разных валютах.
 
 Текст: "{text}"
 
 Верни ТОЛЬКО JSON без markdown-тиков:
-{{"name": "<имя человека>", "amount": <число>, "note": "<за что, если упомянуто, иначе пустая строка>"}}
+{{
+  "name": "<имя человека>",
+  "amounts": [
+    {{"amount": <число>, "currency": "<UAH или USD или EUR>"}}
+  ],
+  "note": "<за что, если упомянуто, иначе пустая строка>"
+}}
 
 Правила:
-- name: только имя человека
-- amount: только число
-- note: краткое описание за что дал в долг"""
+- name: только имя
+- currency: UAH для гривен/грн/₴, USD для долларов/$, EUR для евро/€
+- Если валюта не указана — UAH
+- amounts: массив всех сумм (может быть несколько)
+- note: краткое описание"""
 
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=150,
+        max_tokens=200,
         temperature=0.1
     )
     raw = response.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
+    bracket_start = raw.find("{")
+    bracket_end = raw.rfind("}")
+    if bracket_start != -1 and bracket_end != -1:
+        raw = raw[bracket_start:bracket_end+1]
     return json.loads(raw)
+
+CURRENCY_SYMBOLS = {"UAH": "₴", "USD": "$", "EUR": "€"}
+CURRENCY_NAMES = {"UAH": "гривен", "USD": "долларов", "EUR": "евро"}
+
+def format_debt_amounts(amounts: list) -> str:
+    """Форматирует список сумм в строку: 550 $ + 300 ₴"""
+    parts = []
+    for a in amounts:
+        sym = CURRENCY_SYMBOLS.get(a.get("currency", "UAH"), "₴")
+        parts.append(f"*{a['amount']:,.0f} {sym}*")
+    return " + ".join(parts)
 
 def build_debts_message():
     active = {k: v for k, v in debts.items()}
     if not active:
         return "✅ Активных долгов нет!"
     lines = ["💸 *Активные долги:*\n"]
+    uah_total = 0.0
     for debt_id, d in active.items():
         days_ago = (datetime.now() - datetime.strptime(d["date"], "%d.%m.%Y")).days
         note_str = f" — _{d['note']}_" if d.get("note") else ""
-        lines.append(f"👤 *{d['name']}* — *{d['amount']:,.0f} ₴*{note_str}")
+        amounts = d.get("amounts", [{"amount": d.get("amount", 0), "currency": "UAH"}])
+        amt_str = format_debt_amounts(amounts)
+        lines.append(f"👤 *{d['name']}* — {amt_str}{note_str}")
         lines.append(f"   📅 {d['date']} ({days_ago} дн. назад)")
-    total = sum(d["amount"] for d in active.values())
-    lines.append(f"\n💰 *Итого: {total:,.0f} ₴*")
+        # Считаем только гривны для итога
+        for a in amounts:
+            if a.get("currency", "UAH") == "UAH":
+                uah_total += float(a["amount"])
+    if uah_total > 0:
+        lines.append(f"\n💰 *Итого в гривнах: {uah_total:,.0f} ₴*")
     return "\n".join(lines)
 
 async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
@@ -597,6 +627,8 @@ async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
         return  # долг уже погашен
 
     d = debts[debt_id]
+    amounts = d.get("amounts", [{"amount": d.get("amount", 0), "currency": "UAH"}])
+    amt_str = format_debt_amounts(amounts)
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Долг вернули", callback_data=f"paid_{debt_id}"),
         InlineKeyboardButton("⏰ Напомнить ещё", callback_data=f"remind_{debt_id}")
@@ -604,7 +636,7 @@ async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"💸 *Напоминание о долге*\n\n"
-             f"👤 *{d['name']}* должен тебе *{d['amount']:,.0f} ₴*\n"
+             f"👤 *{d['name']}* должен тебе {amt_str}\n"
              f"📅 Дата: {d['date']}\n"
              f"{'📝 ' + d['note'] if d.get('note') else ''}\n\n"
              f"Долг вернули?",
@@ -1465,17 +1497,28 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     if any(kw in lower for kw in debt_keywords):
         try:
             parsed = parse_debt(text)
-            if parsed.get("amount") and parsed.get("name"):
+            amounts = parsed.get("amounts", [])
+            # Поддержка старого формата
+            if not amounts and parsed.get("amount"):
+                amounts = [{"amount": float(parsed["amount"]), "currency": "UAH"}]
+
+            if amounts and parsed.get("name"):
                 debt_counter[0] += 1
                 debt_id = str(debt_counter[0])
                 date_str = datetime.now().strftime("%d.%m.%Y")
                 debts[debt_id] = {
                     "name": parsed["name"],
-                    "amount": float(parsed["amount"]),
+                    "amounts": amounts,
                     "date": date_str,
                     "note": parsed.get("note", "")
                 }
-                save_debt_to_sheet(debt_id, parsed["name"], float(parsed["amount"]), date_str, parsed.get("note", ""))
+                # Для совместимости с таблицей сохраняем строку сумм
+                amounts_str = " + ".join(
+                    f"{a['amount']} {CURRENCY_SYMBOLS.get(a.get('currency','UAH'),'₴')}"
+                    for a in amounts
+                )
+                save_debt_to_sheet(debt_id, parsed["name"], amounts_str, date_str, parsed.get("note", ""))
+
                 chat_id = update.effective_chat.id
                 context.job_queue.run_once(
                     send_debt_reminder,
@@ -1484,10 +1527,11 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                     name=f"debt_{debt_id}"
                 )
                 note_str = f"\n📝 {parsed['note']}" if parsed.get("note") else ""
+                amt_str = format_debt_amounts(amounts)
                 await update.message.reply_text(
                     f"💸 *Долг записан!*\n\n"
                     f"👤 Кому: *{parsed['name']}*\n"
-                    f"💰 Сумма: *{float(parsed['amount']):,.0f} ₴*{note_str}\n\n"
+                    f"💰 Сумма: {amt_str}{note_str}\n\n"
                     f"⏰ Напомню через 2 недели если не вернут.",
                     parse_mode="Markdown"
                 )
