@@ -230,6 +230,177 @@ def get_smart_comment(category, description, amount, month_records):
     return "\n".join(comments)
 
 # ============================================================
+# КОНТЕКСТНАЯ ПАМЯТЬ (АТБ = продукты автоматически)
+# ============================================================
+memory = {}  # {keyword: category}
+
+DEFAULT_MEMORY = {
+    "атб": "Еда / продукты",
+    "сільпо": "Еда / продукты",
+    "новус": "Еда / продукты",
+    "метро": "Еда / продукты",
+    "glovo": "Еда / продукты",
+    "болт фуд": "Еда / продукты",
+    "bolt food": "Еда / продукты",
+    "окко": "Транспорт",
+    "wog": "Транспорт",
+    "uber": "Транспорт",
+    "bolt": "Транспорт",
+    "аптека": "Здоровье / аптека",
+    "зyn": "Никотин",
+    "zyн": "Никотин",
+    "снюс": "Никотин",
+    "вейп": "Никотин",
+    "steam": "Развлечения",
+    "алик": "Развлечения",
+    "netflix": "Развлечения",
+    "spotify": "Развлечения",
+}
+
+def get_memory_category(text: str) -> str | None:
+    """Ищет категорию по памяти для данного текста"""
+    lower = text.lower()
+    combined = {**DEFAULT_MEMORY, **memory}
+    for keyword, category in combined.items():
+        if keyword in lower:
+            return category
+    return None
+
+def update_memory(keyword: str, category: str):
+    """Запоминает связку слово → категория"""
+    if keyword and len(keyword) > 2:
+        memory[keyword.lower()] = category
+
+# ============================================================
+# БЫСТРЫЙ РЕЖИМ (просто число → бот уточняет категорию)
+# ============================================================
+pending_quick = {}  # {chat_id: amount}
+
+async def handle_quick_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: float):
+    """Пользователь написал просто число — спрашиваем категорию"""
+    chat_id = update.effective_chat.id
+    pending_quick[str(chat_id)] = amount
+
+    keyboard = []
+    row = []
+    for cat in CATEGORIES:
+        emoji = EMOJI_MAP.get(cat, "📦")
+        row.append(InlineKeyboardButton(f"{emoji} {cat}", callback_data=f"quick_{cat}_{amount}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    await update.message.reply_text(
+        f"⚡ *{amount:,.0f} ₴* — какая категория?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ============================================================
+# УМНЫЕ ПРЕДУПРЕЖДЕНИЯ
+# ============================================================
+def get_smart_warnings(chat_id) -> list:
+    """Анализирует темп трат и выдаёт предупреждения"""
+    warnings = []
+    records = get_current_month_records()
+    if not records:
+        return warnings
+
+    stats = analyze_records(records)
+    now = datetime.now()
+    days_passed = now.day
+    days_in_month = 30
+    daily_avg = stats["total"] / days_passed
+    projected = daily_avg * days_in_month
+
+    # Предупреждение по темпу относительно прошлого месяца
+    prev_month = (now.replace(day=1) - timedelta(days=1))
+    all_records = get_all_records()
+    prev_records = [r for r in all_records if _record_in_month(r, prev_month.month, prev_month.year)]
+    if prev_records:
+        prev_stats = analyze_records(prev_records)
+        if prev_stats and prev_stats["total"] > 0:
+            diff_pct = int(((projected - prev_stats["total"]) / prev_stats["total"]) * 100)
+            if diff_pct > 20:
+                warnings.append(f"🚨 Идёшь к перерасходу *+{diff_pct}%* vs прошлый месяц")
+            elif diff_pct > 10:
+                warnings.append(f"⚠️ Темп трат выше прошлого месяца на *{diff_pct}%*")
+
+    # Предупреждение по бюджету
+    budget_status = get_budget_status(chat_id)
+    if budget_status:
+        pct = budget_status["percent"]
+        days_percent = int((days_passed / days_in_month) * 100)
+        if pct > days_percent + 15:
+            warnings.append(f"🚨 Потрачено *{pct}%* бюджета за *{days_percent}%* месяца!")
+
+    return warnings
+
+# ============================================================
+# СРАВНЕНИЕ МЕСЯЦЕВ
+# ============================================================
+def build_months_comparison() -> str:
+    all_records = get_all_records()
+    now = datetime.now()
+
+    months_data = {}
+    for r in all_records:
+        try:
+            date = datetime.strptime(r.get("Дата", "")[:10], "%d.%m.%Y")
+            key = (date.year, date.month)
+            if key not in months_data:
+                months_data[key] = []
+            months_data[key].append(r)
+        except:
+            continue
+
+    if len(months_data) < 2:
+        return "📭 Нужно минимум 2 месяца данных для сравнения."
+
+    sorted_months = sorted(months_data.keys(), reverse=True)[:3]  # последние 3 месяца
+    month_names = ["Январь","Февраль","Март","Апрель","Май","Июнь",
+                   "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
+
+    lines = ["📊 *Сравнение месяцев*\n"]
+
+    prev_total = None
+    for year, month in sorted_months:
+        records = months_data[(year, month)]
+        stats = analyze_records(records)
+        name = f"{month_names[month-1]} {year}"
+
+        if prev_total is not None:
+            diff_pct = int(((stats["total"] - prev_total) / prev_total) * 100)
+            arrow = "📈" if diff_pct > 0 else "📉"
+            sign = "+" if diff_pct > 0 else ""
+            lines.append(f"*{name}*: {stats['total']:,.0f} ₴ {arrow} {sign}{diff_pct}%")
+        else:
+            lines.append(f"*{name}*: {stats['total']:,.0f} ₴")
+
+        # Топ категория
+        if stats["by_category"]:
+            top_cat = max(stats["by_category"], key=stats["by_category"].get)
+            top_amt = stats["by_category"][top_cat]
+            lines.append(f"  └ Топ: {EMOJI_MAP.get(top_cat,'📦')} {top_cat} — {top_amt:,.0f} ₴")
+
+        prev_total = stats["total"]
+
+    # Вывод по разнице текущего и прошлого
+    if len(sorted_months) >= 2:
+        cur = analyze_records(months_data[sorted_months[0]])
+        prv = analyze_records(months_data[sorted_months[1]])
+        if cur and prv and prv["total"] > 0:
+            diff = cur["total"] - prv["total"]
+            diff_pct = int((diff / prv["total"]) * 100)
+            sign = "+" if diff > 0 else ""
+            verdict = "Тратишь больше 📈" if diff > 0 else "Тратишь меньше 📉"
+            lines.append(f"\n{verdict}: {sign}{diff:,.0f} ₴ ({sign}{diff_pct}%)")
+
+    return "\n".join(lines)
+
+# ============================================================
 # БЮДЖЕТ
 # ============================================================
 budget_storage = {}
@@ -395,13 +566,187 @@ def parse_expenses(text):
     return [result] if isinstance(result, dict) else result
 
 # ============================================================
+# ПЕРСОНАЛЬНЫЕ СОВЕТЫ
+# ============================================================
+def generate_advice(records) -> str:
+    """Генерирует персональные советы на основе данных за месяц"""
+    if not records or len(records) < 5:
+        return ""
+
+    stats = analyze_records(records)
+    if not stats:
+        return ""
+
+    total = stats["total"]
+    by_cat = stats["by_category"]
+    advice = []
+
+    # Совет по кафе/еде вне дома
+    cafe_keywords = ["кофе", "кафе", "ресторан", "фастфуд", "доставка", "glovo"]
+    cafe_total = sum(
+        v["total"] for k, v in stats.get("leaks", {}).items()
+        if any(kw in k for kw in cafe_keywords)
+    )
+    food_total = by_cat.get("Еда / продукты", 0)
+    if food_total > total * 0.35:
+        saving = food_total * 0.25
+        advice.append(
+            f"🍔 На еду уходит {int(food_total/total*100)}% бюджета. "
+            f"Если сократить на 25% — сэкономишь *{saving:,.0f} ₴/мес*"
+        )
+
+    # Совет по развлечениям
+    ent_total = by_cat.get("Развлечения", 0)
+    if ent_total > total * 0.20:
+        saving = ent_total * 0.30
+        advice.append(
+            f"🎮 Развлечения — {int(ent_total/total*100)}% трат. "
+            f"Сократить на 30% = *+{saving:,.0f} ₴* в кармане"
+        )
+
+    # Совет по никотину
+    nic_total = by_cat.get("Никотин", 0)
+    if nic_total > 500:
+        annual = nic_total * 12
+        advice.append(
+            f"🚬 На никотин: *{nic_total:,.0f} ₴/мес* = *{annual:,.0f} ₴/год*. "
+            f"Есть над чем подумать 💭"
+        )
+
+    # Совет по транспорту
+    trans_total = by_cat.get("Транспорт", 0)
+    if trans_total > total * 0.25:
+        advice.append(
+            f"🚗 Транспорт съедает {int(trans_total/total*100)}% бюджета ({trans_total:,.0f} ₴). "
+            f"Может, иногда такси → маршрутка?"
+        )
+
+    # Совет по утечкам
+    leaks = stats.get("leaks", {})
+    if leaks:
+        top_leak = max(leaks.items(), key=lambda x: x[1]["total"])
+        name, data = top_leak
+        if data["total"] > 300:
+            advice.append(
+                f"💸 «{name}» — {data['count']} раз = *{data['total']:,.0f} ₴*. "
+                f"Самая частая трата месяца"
+            )
+
+    # Сравнение с прошлым месяцем
+    all_records = get_all_records()
+    now = datetime.now()
+    prev_month = (now.replace(day=1) - timedelta(days=1))
+    prev_records = [
+        r for r in all_records
+        if _record_in_month(r, prev_month.month, prev_month.year)
+    ]
+    if prev_records:
+        prev_stats = analyze_records(prev_records)
+        if prev_stats and prev_stats["total"] > 0:
+            diff_pct = int(((total - prev_stats["total"]) / prev_stats["total"]) * 100)
+            if diff_pct > 15:
+                advice.append(
+                    f"📈 Траты выросли на *{diff_pct}%* по сравнению с прошлым месяцем "
+                    f"({prev_stats['total']:,.0f} ₴ → {total:,.0f} ₴)"
+                )
+            elif diff_pct < -10:
+                advice.append(
+                    f"📉 Молодец! Траты упали на *{abs(diff_pct)}%* по сравнению с прошлым месяцем 🎉"
+                )
+
+    if not advice:
+        return ""
+
+    lines = ["💡 *Персональные советы:*\n"]
+    for i, a in enumerate(advice[:4], 1):
+        lines.append(f"{i}. {a}")
+    return "\n".join(lines)
+
+
+def _record_in_month(r, month, year):
+    try:
+        date = datetime.strptime(r.get("Дата", "")[:10], "%d.%m.%Y")
+        return date.month == month and date.year == year
+    except:
+        return False
+
+
+# ============================================================
+# ИНСАЙТ НЕДЕЛИ
+# ============================================================
+def build_weekly_insight() -> str:
+    """Умный инсайт — бот анализирует паттерны и выдаёт главный вывод"""
+    records = get_week_records()
+    month_records = get_current_month_records()
+
+    if not records:
+        return "📭 За эту неделю данных ещё нет."
+
+    stats = analyze_records(records)
+    insights = []
+
+    # Самый дорогой день
+    if stats["by_day"]:
+        top_day = max(stats["by_day"], key=stats["by_day"].get)
+        top_amt = stats["by_day"][top_day]
+        avg_day = stats["total"] / 7
+        if top_amt > avg_day * 1.5:
+            pct = int((top_amt / avg_day - 1) * 100)
+            insights.append(f"📅 Самый дорогой день — *{top_day}* (+{pct}% от среднего)")
+
+    # Топ категория недели
+    if stats["by_category"]:
+        top_cat = max(stats["by_category"], key=stats["by_category"].get)
+        top_amt = stats["by_category"][top_cat]
+        pct = int((top_amt / stats["total"]) * 100)
+        insights.append(
+            f"{EMOJI_MAP.get(top_cat, '📦')} Основная трата недели: *{top_cat}* — {pct}% от всех расходов"
+        )
+
+    # Утечки недели
+    if stats["leaks"]:
+        top = max(stats["leaks"].items(), key=lambda x: x[1]["total"])
+        insights.append(
+            f"💸 Повторяющаяся трата: *{top[0]}* — {top[1]['count']} раза на *{top[1]['total']:,.0f} ₴*"
+        )
+
+    # Прогноз месяца на основе недели
+    if month_records:
+        month_stats = analyze_records(month_records)
+        now = datetime.now()
+        daily_avg = month_stats["total"] / now.day
+        projected = daily_avg * 30
+        insights.append(f"📈 По текущему темпу месяц выйдет на *~{projected:,.0f} ₴*")
+
+    # Персональный совет
+    advice = generate_advice(month_records)
+
+    lines = ["🧠 *Инсайт недели*\n"]
+    lines += insights
+    if advice:
+        lines.append(f"\n{advice}")
+
+    return "\n".join(lines)
+
+
+async def send_weekly_insight(context: ContextTypes.DEFAULT_TYPE):
+    """Авто-отправка инсайта каждую пятницу в 19:00"""
+    chat_id = context.job.data.get("chat_id")
+    if not chat_id:
+        return
+    insight = build_weekly_insight()
+    await context.bot.send_message(chat_id=chat_id, text=insight, parse_mode="Markdown")
+
+
+# ============================================================
 # HANDLERS
 # ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("📊 Статистика"), KeyboardButton("📅 Отчёт за неделю")],
         [KeyboardButton("📆 Отчёт за месяц"), KeyboardButton("💰 Бюджет")],
-        [KeyboardButton("💸 Долги")]
+        [KeyboardButton("💸 Долги"), KeyboardButton("💡 Советы")],
+        [KeyboardButton("📊 Сравнение месяцев")]
     ]
     await update.message.reply_text(
         "👋 Привет! Я твой финансовый аналитик.\n\n"
@@ -486,7 +831,33 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def debts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Сравниваю месяцы...")
+    try:
+        await update.message.reply_text(build_months_comparison(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Compare error: {e}")
+        await update.message.reply_text("❌ Ошибка при сравнении.")
+
+async def advice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Анализирую твои траты...")
+    try:
+        records = get_current_month_records()
+        advice = generate_advice(records)
+        insight = build_weekly_insight()
+        msg = ""
+        if advice:
+            msg += advice
+        if insight:
+            msg += f"\n\n{insight}"
+        if not msg:
+            msg = "📭 Пока недостаточно данных для советов. Записывай траты несколько дней!"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Advice error: {e}")
+        await update.message.reply_text("❌ Ошибка при формировании советов.")
+
+
     msg = build_debts_message()
     if debts:
         keyboard = InlineKeyboardMarkup([[
@@ -500,6 +871,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+
+    if data.startswith("quick_"):
+        parts = data.split("_", 2)
+        if len(parts) == 3:
+            _, category, amount_str = parts
+            amount = float(amount_str)
+            date = datetime.now().strftime("%d.%m.%Y %H:%M")
+            save_expense(date, amount, category, "быстрая запись", str(amount))
+            update_memory("", category)
+            emoji = EMOJI_MAP.get(category, "📦")
+            await query.edit_message_text(
+                f"⚡ *{amount:,.0f} ₴* → {emoji} {category}\n✅ Записано!",
+                parse_mode="Markdown"
+            )
+        return
 
     if data == "show_debts":
         if not debts:
@@ -575,6 +961,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await monthly_report_command(update, context); return
     if text == "💰 Бюджет":
         await budget_command(update, context); return
+    if text == "📊 Сравнение месяцев":
+        await compare_command(update, context); return
+    if text == "💡 Советы":
+        await advice_command(update, context); return
     if text == "💸 Долги":
         await debts_command(update, context); return
     await process_message(update, context, text)
@@ -610,8 +1000,6 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                     "note": parsed.get("note", "")
                 }
                 save_debt_to_sheet(debt_id, parsed["name"], float(parsed["amount"]), date_str, parsed.get("note", ""))
-
-                # Планируем напоминание через 2 недели
                 chat_id = update.effective_chat.id
                 context.job_queue.run_once(
                     send_debt_reminder,
@@ -619,7 +1007,6 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                     data={"debt_id": debt_id, "chat_id": chat_id},
                     name=f"debt_{debt_id}"
                 )
-
                 note_str = f"\n📝 {parsed['note']}" if parsed.get("note") else ""
                 await update.message.reply_text(
                     f"💸 *Долг записан!*\n\n"
@@ -632,14 +1019,40 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         except Exception as e:
             logger.error(f"Debt parse error: {e}")
 
+    # ⚡ Быстрый режим — просто число
+    stripped = text.strip().replace(",", ".").replace(" ", "")
+    if re.fullmatch(r'\d+(\.\d+)?', stripped):
+        amount = float(stripped)
+        # Проверяем память — может уже знаем категорию
+        mem_cat = get_memory_category(text)
+        if mem_cat:
+            # Сразу записываем без уточнения
+            date = datetime.now().strftime("%d.%m.%Y %H:%M")
+            save_expense(date, amount, mem_cat, "быстрая запись", text)
+            await update.message.reply_text(
+                f"⚡ *{amount:,.0f} ₴* → {EMOJI_MAP.get(mem_cat,'📦')} {mem_cat}\n_Записано!_",
+                parse_mode="Markdown"
+            )
+        else:
+            await handle_quick_mode(update, context, amount)
+        return
+
     # Обычные расходы
     try:
+        # Проверяем память для автокатегоризации
+        mem_cat = get_memory_category(text)
+
         expenses = parse_expenses(text)
         if not expenses:
             await update.message.reply_text(
                 "🤔 Не нашёл сумму.\nПопробуй: «Снюс 800» или «Продукты 500, такси 200»"
             )
             return
+
+        # Применяем память если AI не уверен
+        for exp in expenses:
+            if mem_cat and exp.get("category") == "Другое":
+                exp["category"] = mem_cat
 
         date = datetime.now().strftime("%d.%m.%Y %H:%M")
         month_records = get_current_month_records()
@@ -652,6 +1065,8 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             save_expense(date, amount, category, description, text)
             emoji = EMOJI_MAP.get(category, "📦")
             lines.append(f"{emoji} {description} — *{amount:,.0f} ₴* ({category})")
+            # Обновляем память
+            update_memory(description, category)
 
         if len(expenses) > 1:
             total = sum(float(e["amount"]) for e in expenses)
@@ -666,6 +1081,11 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         )
         if comment:
             lines.append(f"\n{comment}")
+
+        # 🚨 Умные предупреждения
+        warnings = get_smart_warnings(update.effective_chat.id)
+        for w in warnings:
+            lines.append(f"\n{w}")
 
         # Предупреждение бюджета
         budget_status = get_budget_status(update.effective_chat.id)
@@ -694,12 +1114,25 @@ def main():
     app.add_handler(CommandHandler("month", monthly_report_command))
     app.add_handler(CommandHandler("budget", budget_command))
     app.add_handler(CommandHandler("debts", debts_command))
+    app.add_handler(CommandHandler("compare", compare_command))
+    app.add_handler(CommandHandler("advice", advice_command))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     load_debts_from_sheet()
-    logger.info("Бот запущен! v2.1")
+
+    # Авто-инсайт каждую пятницу в 19:00
+    chat_id = os.getenv("CHAT_ID")
+    if chat_id and app.job_queue:
+        app.job_queue.run_daily(
+            send_weekly_insight,
+            time=datetime.strptime("19:00", "%H:%M").time(),
+            days=(4,),  # 4 = пятница
+            data={"chat_id": chat_id}
+        )
+
+    logger.info("Бот запущен! v2.3")
     app.run_polling()
 
 if __name__ == "__main__":
