@@ -23,7 +23,7 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Другое"]
+CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Никотин", "Другое"]
 
 
 def get_sheet():
@@ -111,21 +111,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "❓ *Помощь*\n\n"
-        "Говори или пиши о своих тратах:\n"
-        "• «Купил продукты на 1200»\n"
-        "• «Бензин 2500 рублей»\n"
-        "• «Кино с друзьями 800 р»\n\n"
+# async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  #  await update.message.reply_text(
+    #    "❓ *Помощь*\n\n"
+    #    "Говори или пиши о своих тратах:\n"
+     #   "• «Купил продукты на 1200»\n"
+     #   "• «Бензин 2500 рублей»\n"
+    #    "• «Кино с друзьями 800 р»\n\n"
         "Категории:\n"
-        "🍔 Еда / продукты\n"
-        "🚗 Транспорт\n"
-        "🎮 Развлечения\n"
-        "💊 Здоровье / аптека\n"
-        "📦 Другое",
-        parse_mode="Markdown"
-    )
+       # "🍔 Еда / продукты\n"
+     #   "🚗 Транспорт\n"
+      #  "🎮 Развлечения\n"
+     #   "💊 Здоровье / аптека\n"
+     #   "📦 Другое",
+      #  parse_mode="Markdown"
+ #   )
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -137,7 +137,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         emoji_map = {
             "Еда / продукты": "🍔", "Транспорт": "🚗",
-            "Развлечения": "🎮", "Здоровье / аптека": "💊", "Другое": "📦"
+            "Развлечения": "🎮", "Здоровье / аптека": "💊", "Никотин": "🚬", "Другое": "📦"
         }
         lines = [f"📊 *Статистика трат* ({stats['count']} записей)\n"]
         for cat, amt in sorted(stats["by_category"].items(), key=lambda x: -x[1]):
