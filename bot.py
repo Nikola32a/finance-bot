@@ -831,6 +831,16 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+async def debts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = build_debts_message()
+    if debts:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Отметить погашенным", callback_data="show_debts")
+        ]])
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=keyboard)
+    else:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
 async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Сравниваю месяцы...")
     try:
