@@ -2,7 +2,6 @@ import os
 import logging
 import tempfile
 import json
-import urllib.request
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -16,7 +15,6 @@ from google.oauth2.service_account import Credentials
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
@@ -38,7 +36,7 @@ def get_sheet():
     client = gspread.authorize(creds)
     sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
     if not sheet.get_all_values():
-        sheet.insert_row(["Дата", "Сумма (₽)", "Категория", "Описание", "Исходный текст"], 1)
+        sheet.insert_row(["Дата", "Сумма (₴)", "Категория", "Описание", "Исходный текст"], 1)
     return sheet
 
 
@@ -52,11 +50,11 @@ def get_stats():
     records = sheet.get_all_records()
     if not records:
         return None
-    total = sum(float(r["Сумма (₽)"]) for r in records if r["Сумма (₽)"])
+    total = sum(float(r["Сумма (₴)"]) for r in records if r["Сумма (₴)"])
     by_category = {}
     for r in records:
         cat = r["Категория"]
-        amt = float(r["Сумма (₽)"]) if r["Сумма (₽)"] else 0
+        amt = float(r["Сумма (₴)"]) if r["Сумма (₴)"] else 0
         by_category[cat] = by_category.get(cat, 0) + amt
     return {"total": total, "by_category": by_category, "count": len(records)}
 
@@ -86,24 +84,13 @@ def parse_expense(text: str) -> dict:
 - Если сумма не упомянута — null
 - description: очень кратко суть покупки"""
 
-    payload = json.dumps({
-       "model": "google/gemma-3-4b-it:free",
-        "messages": [{"role": "user", "content": prompt}]
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://finance-bot.app",
-        }
+    response = groq_client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=200,
+        temperature=0.1
     )
-    with urllib.request.urlopen(req) as resp:
-        data = json.loads(resp.read().decode())
-
-    raw = data["choices"][0]["message"]["content"].strip()
+    raw = response.choices[0].message.content.strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
     return json.loads(raw)
 
@@ -155,8 +142,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [f"📊 *Статистика трат* ({stats['count']} записей)\n"]
         for cat, amt in sorted(stats["by_category"].items(), key=lambda x: -x[1]):
             emoji = emoji_map.get(cat, "📦")
-            lines.append(f"{emoji} {cat}: *{amt:,.0f} ₽*")
-        lines.append(f"\n💰 *Итого: {stats['total']:,.0f} ₽*")
+            lines.append(f"{emoji} {cat}: *{amt:,.0f} ₴*")
+        lines.append(f"\n💰 *Итого: {stats['total']:,.0f} ₴*")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Stats error: {e}")
@@ -213,7 +200,7 @@ async def process_expense_text(update: Update, text: str):
         await update.message.reply_text(
             f"✅ *Записано!*\n\n"
             f"{emoji} {category}\n"
-            f"💸 *{amount:,.0f} ₽*\n"
+            f"💸 *{amount:,.0f} ₴*\n"
             f"📌 {description}",
             parse_mode="Markdown"
         )
