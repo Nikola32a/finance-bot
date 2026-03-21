@@ -636,7 +636,8 @@ def parse_expenses(text):
 Правила:
 - amount: только число, никогда не null
 - Если сумма не указана — не включай трату
-- Даже одна трата — возвращай массив"""
+- Даже одна трата — возвращай массив
+- НИКАКОГО текста кроме JSON"""
 
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
@@ -644,7 +645,25 @@ def parse_expenses(text):
         max_tokens=500,
         temperature=0.1
     )
-    raw = response.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
+    raw = response.choices[0].message.content.strip()
+    raw = raw.replace("```json", "").replace("```", "").strip()
+
+    # Защита от пустого ответа
+    if not raw:
+        logger.warning(f"Empty response from Groq for text: {text}")
+        # Пробуем извлечь сумму вручную
+        numbers = re.findall(r'\d+(?:[.,]\d+)?', text)
+        if numbers:
+            amount = float(numbers[0].replace(",", "."))
+            return [{"amount": amount, "category": "Другое", "description": text[:30]}]
+        return []
+
+    # Ищем JSON массив в ответе если есть лишний текст
+    bracket_start = raw.find("[")
+    bracket_end = raw.rfind("]")
+    if bracket_start != -1 and bracket_end != -1:
+        raw = raw[bracket_start:bracket_end+1]
+
     result = json.loads(raw)
     return [result] if isinstance(result, dict) else result
 
