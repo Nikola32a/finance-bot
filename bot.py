@@ -2,6 +2,7 @@ import os
 import logging
 import tempfile
 import json
+import urllib.request
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -10,19 +11,16 @@ load_dotenv()
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
-import google.generativeai as genai
 import gspread
 from google.oauth2.service_account import Credentials
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -88,8 +86,25 @@ def parse_expense(text: str) -> dict:
 - Если сумма не упомянута — null
 - description: очень кратко суть покупки"""
 
-    response = gemini_model.generate_content(prompt)
-    raw = response.text.strip().replace("```json", "").replace("```", "").strip()
+    payload = json.dumps({
+        "model": "mistralai/mistral-7b-instruct:free",
+        "messages": [{"role": "user", "content": prompt}]
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://finance-bot.app",
+        }
+    )
+    with urllib.request.urlopen(req) as resp:
+        data = json.loads(resp.read().decode())
+
+    raw = data["choices"][0]["message"]["content"].strip()
+    raw = raw.replace("```json", "").replace("```", "").strip()
     return json.loads(raw)
 
 
