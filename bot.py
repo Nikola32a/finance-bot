@@ -35,13 +35,45 @@ EMOJI_MAP = {
 
 CATEGORY_RULES = """
 ПРАВИЛА КАТЕГОРИЙ:
-🍔 Еда / продукты: продукты, супермаркет, АТБ, Сільпо, Новус, кафе, ресторан, фастфуд, McDonald's, KFC, пицца, суши, Glovo, Bolt Food, кофе, алкоголь, пиво, вино
-🚗 Транспорт: бензин, дизель, топливо, заправка, АЗС, ОККО, WOG, мойка машины, автомойка, запчасти, масло, шины, аккумулятор, ремонт авто, СТО, детейлинг, такси, Uber, Bolt, автобус, маршрутка, метро, поезд, парковка, страховка авто
-🎮 Развлечения: Steam, игры, донат, кейсы, скины, CS, Dota, AliExpress, Алик, тема, кино, Netflix, Spotify, YouTube Premium, боулинг, квест, ставки, казино, покер, подписки
-💊 Здоровье / аптека: аптека, лекарства, таблетки, витамины, врач, стоматолог, клиника, анализы, спортзал, фитнес, массаж, косметолог, парикмахер, стрижка, маникюр
-🚬 Никотин: снюс, никотиновые пакетики, ZYN, сигареты, вейп, под, жижа, кальян
-📦 Другое: одежда, коммунальные, интернет, телефон, подарки, ремонт дома, всё остальное
+🍔 Еда / продукты: продукты, супермаркет, АТБ, Сільпо, Новус, кафе ☕, ресторан 🍽, фастфуд 🍟, McDonald's, KFC, пицца 🍕, суши 🍣, Glovo, Bolt Food, кофе ☕, алкоголь 🍺, пиво, вино 🍷, доставка еды
+🚗 Транспорт: бензин ⛽, дизель, топливо, заправка, АЗС, ОККО, WOG, мойка машины 🚿, автомойка, запчасти 🔧, масло, шины, аккумулятор, ремонт авто 🔩, СТО, детейлинг, такси 🚕, Uber, Bolt, автобус 🚌, маршрутка, метро 🚇, поезд 🚂, парковка 🅿️, страховка авто
+🎮 Развлечения: Steam 🎮, игры, донат, кейсы, скины, CS, Dota, AliExpress 📦, Алик, тема, кино 🎬, Netflix, Spotify 🎵, YouTube Premium, боулинг 🎳, квест 🔍, ставки, казино 🎰, покер, подписки
+💊 Здоровье / аптека: аптека 💊, лекарства, таблетки, витамины, врач 👨‍⚕️, стоматолог 🦷, клиника, анализы, спортзал 💪, фитнес, массаж 💆, косметолог, парикмахер ✂️, стрижка, маникюр 💅
+🚬 Никотин: снюс, никотиновые пакетики, ZYN, сигареты 🚬, вейп, под, жижа, кальян
+📦 Другое: одежда 👕, коммунальные 🏠, интернет 🌐, телефон 📱, подарки 🎁, ремонт дома 🔨, всё остальное
 """
+
+# Смайлики для описаний трат
+DESCRIPTION_EMOJIS = {
+    "кофе": "☕", "кафе": "☕", "ресторан": "🍽", "обед": "🍽", "ужин": "🍽",
+    "завтрак": "🥐", "пицца": "🍕", "суши": "🍣", "фастфуд": "🍟", "бургер": "🍔",
+    "продукты": "🛒", "супермаркет": "🛒", "атб": "🛒", "магазин": "🛒",
+    "алкоголь": "🍺", "пиво": "🍺", "вино": "🍷",
+    "бензин": "⛽", "заправка": "⛽", "топливо": "⛽",
+    "такси": "🚕", "uber": "🚕", "bolt": "🚕",
+    "мойка": "🚿", "автомойка": "🚿",
+    "запчасти": "🔧", "ремонт": "🔧", "сто": "🔧", "масло": "🔧",
+    "кино": "🎬", "фильм": "🎬", "кинотеатр": "🎬",
+    "игры": "🎮", "steam": "🎮", "донат": "🎮", "кейсы": "🎮",
+    "аптека": "💊", "лекарства": "💊", "таблетки": "💊", "витамины": "💊",
+    "врач": "👨‍⚕️", "стоматолог": "🦷", "клиника": "🏥",
+    "спортзал": "💪", "фитнес": "💪", "тренировка": "💪",
+    "парикмахер": "✂️", "стрижка": "✂️", "маникюр": "💅",
+    "снюс": "🚬", "вейп": "🚬", "сигареты": "🚬", "кальян": "🚬",
+    "одежда": "👕", "кроссовки": "👟", "обувь": "👟",
+    "телефон": "📱", "интернет": "🌐", "коммунальные": "🏠",
+    "подарок": "🎁", "цветы": "💐",
+    "aliexpress": "📦", "алик": "📦",
+    "netflix": "🎬", "spotify": "🎵",
+}
+
+def add_emoji_to_description(description: str) -> str:
+    """Добавляет смайлик к описанию если подходящий найден"""
+    lower = description.lower()
+    for keyword, emoji in DESCRIPTION_EMOJIS.items():
+        if keyword in lower:
+            return f"{emoji} {description}"
+    return description
 
 CURRENCY_SYMBOLS = {"UAH": "₴", "USD": "$", "EUR": "€"}
 MONTH_NAMES = ["Январь","Февраль","Март","Апрель","Май","Июнь",
@@ -568,6 +600,34 @@ def build_salary_status(chat_id) -> str:
 # ============================================================
 # БЮДЖЕТ (персистентно через Настройки)
 # ============================================================
+def get_reminder_interval(chat_id) -> timedelta:
+    """Возвращает интервал напоминания о долге (по умолчанию 2 недели)"""
+    val = get_setting(f"reminder_interval_{chat_id}")
+    if val:
+        try:
+            days = int(val)
+            return timedelta(days=days)
+        except:
+            pass
+    return timedelta(weeks=2)
+
+def set_reminder_interval(chat_id, days: int):
+    save_setting(f"reminder_interval_{chat_id}", str(days))
+
+def get_reminder_interval_text(chat_id) -> str:
+    val = get_setting(f"reminder_interval_{chat_id}")
+    days = int(val) if val else 14
+    if days == 1:
+        return "1 день"
+    elif days == 7:
+        return "1 неделю"
+    elif days == 14:
+        return "2 недели"
+    elif days == 30:
+        return "1 месяц"
+    else:
+        return f"{days} дней"
+
 def get_budget_status(chat_id):
     val = get_setting(f"budget_{chat_id}")
     if not val:
@@ -1106,6 +1166,25 @@ async def salary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = build_salary_status(update.effective_chat.id)
     await update.message.reply_text(status, parse_mode="Markdown")
 
+async def reminder_settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    current = get_reminder_interval_text(chat_id)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("1 день", callback_data="reminder_1"),
+         InlineKeyboardButton("3 дня", callback_data="reminder_3")],
+        [InlineKeyboardButton("1 неделю", callback_data="reminder_7"),
+         InlineKeyboardButton("2 недели", callback_data="reminder_14")],
+        [InlineKeyboardButton("3 недели", callback_data="reminder_21"),
+         InlineKeyboardButton("1 месяц", callback_data="reminder_30")],
+    ])
+    await update.message.reply_text(
+        f"⏰ *Напоминания о долгах*\n\n"
+        f"Текущий интервал: *{current}*\n\n"
+        f"Выбери как часто напоминать:",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+
 async def compare_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Сравниваю месяцы...")
     try:
@@ -1434,6 +1513,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     msg = "📭 Пока недостаточно данных для советов."
                 await send(msg, parse_mode="Markdown")
 
+            elif action == "reminder":
+                current = get_reminder_interval_text(chat_id)
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("1 день", callback_data="reminder_1"),
+                     InlineKeyboardButton("3 дня", callback_data="reminder_3")],
+                    [InlineKeyboardButton("1 неделю", callback_data="reminder_7"),
+                     InlineKeyboardButton("2 недели", callback_data="reminder_14")],
+                    [InlineKeyboardButton("3 недели", callback_data="reminder_21"),
+                     InlineKeyboardButton("1 месяц", callback_data="reminder_30")],
+                ])
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⏰ *Напоминания о долгах*\n\nТекущий интервал: *{current}*\n\nВыбери как часто напоминать:",
+                    parse_mode="Markdown",
+                    reply_markup=keyboard
+                )
+
         except Exception as e:
             logger.error(f"Menu callback error: {e}")
             await send("❌ Ошибка. Попробуй ещё раз.")
@@ -1557,16 +1653,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if debt_id in debts:
             d = debts[debt_id]
             chat_id = query.message.chat_id
+            interval = get_reminder_interval(chat_id)
             context.job_queue.run_once(
                 send_debt_reminder,
-                when=timedelta(weeks=2),
+                when=interval,
                 data={"debt_id": debt_id, "chat_id": chat_id},
                 name=f"debt_{debt_id}"
             )
+            interval_text = get_reminder_interval_text(chat_id)
             await query.edit_message_text(
-                f"⏰ Напомню о долге *{d['name']}* через 2 недели.",
+                f"⏰ Напомню о долге *{d['name']}* через {interval_text}.",
                 parse_mode="Markdown"
             )
+
+    elif data.startswith("reminder_"):
+        days = int(data.replace("reminder_", ""))
+        chat_id = query.message.chat_id
+        set_reminder_interval(chat_id, days)
+        interval_text = get_reminder_interval_text(chat_id)
+        await query.edit_message_text(
+            f"✅ Интервал напоминаний установлен: *{interval_text}*\n\n"
+            f"Все новые долги будут напоминать через {interval_text}.",
+            parse_mode="Markdown"
+        )
 
     elif data == "back":
         await query.edit_message_text(build_debts_message(), parse_mode="Markdown")
@@ -1634,6 +1743,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("💵 Зарплата", callback_data="menu_salary")],
             [InlineKeyboardButton("🪞 Прошлое я", callback_data="menu_past"),
              InlineKeyboardButton("💸 Привычки", callback_data="menu_habits")],
+            [InlineKeyboardButton("⏰ Напоминания о долгах", callback_data="menu_reminder")],
         ])
         await update.message.reply_text("⚙️ *Прочее* — выбери:", parse_mode="Markdown", reply_markup=keyboard)
         return
@@ -1878,9 +1988,11 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                     )
                     save_debt_to_sheet(debt_id, parsed["name"], amounts_str, date_str, parsed.get("note", ""))
                     chat_id = update.effective_chat.id
+                    interval = get_reminder_interval(chat_id)
+                    interval_text = get_reminder_interval_text(chat_id)
                     context.job_queue.run_once(
                         send_debt_reminder,
-                        when=timedelta(weeks=2),
+                        when=interval,
                         data={"debt_id": debt_id, "chat_id": chat_id},
                         name=f"debt_{debt_id}"
                     )
@@ -1890,7 +2002,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                         f"💸 *Долг записан!*\n\n"
                         f"👤 Кому: *{parsed['name']}*\n"
                         f"💰 Сумма: {amt_str}{note_str}\n\n"
-                        f"⏰ Напомню через 2 недели если не вернут.",
+                        f"⏰ Напомню через {interval_text} если не вернут.",
                         parse_mode="Markdown"
                     )
                     return
@@ -1949,9 +2061,10 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             amount = float(exp["amount"])
             category = exp.get("category", "Другое")
             description = exp.get("description", "—")
+            description_with_emoji = add_emoji_to_description(description)
             save_expense(date, amount, category, description, text)
             emoji = EMOJI_MAP.get(category, "📦")
-            lines.append(f"{emoji} {description} — *{amount:,.0f} ₴* ({category})")
+            lines.append(f"{emoji} {description_with_emoji} — *{amount:,.0f} ₴* ({category})")
             # Обновляем память
             update_memory(description, category)
 
@@ -2001,6 +2114,7 @@ def main():
     app.add_handler(CommandHandler("month", monthly_report_command))
     app.add_handler(CommandHandler("budget", budget_command))
     app.add_handler(CommandHandler("debts", debts_command))
+    app.add_handler(CommandHandler("reminder", reminder_settings_command))
     app.add_handler(CommandHandler("past", past_self_command))
     app.add_handler(CommandHandler("habits", habits_command))
     app.add_handler(CommandHandler("compare", compare_command))
