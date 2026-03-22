@@ -145,17 +145,27 @@ def _cached_records(name="sheet1"):
 _settings_cache = {}
 
 def _get_settings_sheet():
-    sheet = _get_worksheet("Настройки")
-    if not sheet.get_all_values():
-        sheet.insert_row(["Ключ", "Значение"], 1)
-    return sheet
+    try:
+        sheet = _get_worksheet("Настройки")
+        vals = sheet.get_all_values()
+        if not vals or vals[0] != ["Ключ", "Значение"]:
+            if not vals:
+                sheet.insert_row(["Ключ", "Значение"], 1)
+        return sheet
+    except Exception as e:
+        logger.error(f"Settings sheet error: {e}")
+        return None
 
 def load_settings():
     global _settings_cache
     try:
         sheet = _get_settings_sheet()
+        if not sheet:
+            return
         records = sheet.get_all_records()
-        _settings_cache = {r["Ключ"]: r["Значение"] for r in records if r.get("Ключ")}
+        loaded = {r["Ключ"]: str(r["Значение"]) for r in records if r.get("Ключ") and r.get("Значение") != ""}
+        _settings_cache.update(loaded)
+        logger.info(f"Настройки загружены: {list(loaded.keys())}")
     except Exception as e:
         logger.error(f"Load settings error: {e}")
 
@@ -163,6 +173,8 @@ def save_setting(key: str, value: str):
     _settings_cache[key] = value
     try:
         sheet = _get_settings_sheet()
+        if not sheet:
+            return
         records = sheet.get_all_records()
         for i, r in enumerate(records, start=2):
             if r.get("Ключ") == key:
@@ -1634,10 +1646,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         d = debts[debt_id]
         amounts = d.get("amounts", [{"amount": d.get("amount", 0), "currency": "UAH"}])
         amt_str = format_debt_amounts(amounts)
+
+        # Показываем текущее напоминание для этого долга
+        debt_interval = get_setting(f"debt_reminder_{debt_id}")
+        reminder_info = f"⏰ {debt_interval}" if debt_interval else f"⏰ {get_reminder_interval_text(query.message.chat_id)}"
+
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Вернули полностью", callback_data=f"paid_{debt_id}")],
             [InlineKeyboardButton("💰 Частичное погашение", callback_data=f"partial_{debt_id}")],
-            [InlineKeyboardButton("⏰ Напомнить через 2 нед.", callback_data=f"remind_{debt_id}")],
+            [InlineKeyboardButton(f"{reminder_info}", callback_data=f"debt_remind_settings_{debt_id}")],
             [InlineKeyboardButton("← Назад", callback_data="show_debts")],
         ])
         note_str = f"\n📝 {d['note']}" if d.get("note") else ""
@@ -1645,6 +1662,75 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 *{d['name']}* — {amt_str}{note_str}\n📅 {d['date']}\n\nЧто сделать?",
             parse_mode="Markdown",
             reply_markup=keyboard
+        )
+
+    elif data.startswith("debt_remind_settings_"):
+        debt_id = data.replace("debt_remind_settings_", "")
+        if debt_id not in debts:
+            await query.edit_message_text("Долг уже закрыт.")
+            return
+        d = debts[debt_id]
+        current = get_setting(f"debt_reminder_{debt_id}") or get_reminder_interval_text(query.message.chat_id)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("1 день", callback_data=f"dremind_{debt_id}_1"),
+             InlineKeyboardButton("3 дня", callback_data=f"dremind_{debt_id}_3")],
+            [InlineKeyboardButton("1 неделю", callback_data=f"dremind_{debt_id}_7"),
+             InlineKeyboardButton("2 недели", callback_data=f"dremind_{debt_id}_14")],
+            [InlineKeyboardButton("3 недели", callback_data=f"dremind_{debt_id}_21"),
+             InlineKeyboardButton("1 месяц", callback_data=f"dremind_{debt_id}_30")],
+            [InlineKeyboardButton("📅 Конкретная дата", callback_data=f"dremind_date_{debt_id}")],
+            [InlineKeyboardButton("← Назад", callback_data=f"debt_menu_{debt_id}")],
+        ])
+        await query.edit_message_text(
+            f"⏰ *Напоминание для {d['name']}*\n\nТекущее: *{current}*\n\nВыбери интервал или дату:",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    elif data.startswith("dremind_date_"):
+        debt_id = data.replace("dremind_date_", "")
+        if debt_id not in debts:
+            await query.edit_message_text("Долг уже закрыт.")
+            return
+        context.user_data["debt_date_reminder_id"] = debt_id
+        await query.edit_message_text(
+            f"📅 Напиши дату напоминания в формате:\n`ДД.ММ.ГГГГ`\n\nНапример: `25.04.2025`",
+            parse_mode="Markdown"
+        )
+
+    elif data.startswith("dremind_"):
+        # dremind_{debt_id}_{days}
+        parts = data.split("_")
+        debt_id = parts[1]
+        days = int(parts[2])
+        if debt_id not in debts:
+            await query.edit_message_text("Долг уже закрыт.")
+            return
+        d = debts[debt_id]
+        chat_id = query.message.chat_id
+
+        # Отменяем старое напоминание если есть
+        old_jobs = context.job_queue.get_jobs_by_name(f"debt_{debt_id}")
+        for job in old_jobs:
+            job.schedule_removal()
+
+        # Ставим новое
+        interval = timedelta(days=days)
+        context.job_queue.run_once(
+            send_debt_reminder,
+            when=interval,
+            data={"debt_id": debt_id, "chat_id": chat_id},
+            name=f"debt_{debt_id}"
+        )
+
+        # Сохраняем индивидуальный интервал
+        days_names = {1:"1 день",3:"3 дня",7:"1 неделю",14:"2 недели",21:"3 недели",30:"1 месяц"}
+        label = days_names.get(days, f"{days} дней")
+        save_setting(f"debt_reminder_{debt_id}", label)
+
+        await query.edit_message_text(
+            f"✅ Напомню о долге *{d['name']}* через *{label}*.",
+            parse_mode="Markdown"
         )
 
     elif data.startswith("partial_"):
@@ -1830,6 +1916,45 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                     parse_mode="Markdown"
                 )
                 return
+
+    # Установка конкретной даты напоминания для долга
+    if "debt_date_reminder_id" in context.user_data:
+        debt_id = context.user_data.pop("debt_date_reminder_id")
+        try:
+            reminder_date = datetime.strptime(text.strip(), "%d.%m.%Y")
+            now = datetime.now()
+            if reminder_date <= now:
+                await update.message.reply_text("❌ Дата уже прошла. Введи будущую дату.")
+                context.user_data["debt_date_reminder_id"] = debt_id
+                return
+            if debt_id in debts:
+                d = debts[debt_id]
+                chat_id = update.effective_chat.id
+                # Отменяем старое
+                for job in context.job_queue.get_jobs_by_name(f"debt_{debt_id}"):
+                    job.schedule_removal()
+                # Ставим на конкретную дату
+                when = reminder_date - now
+                context.job_queue.run_once(
+                    send_debt_reminder,
+                    when=when,
+                    data={"debt_id": debt_id, "chat_id": chat_id},
+                    name=f"debt_{debt_id}"
+                )
+                label = reminder_date.strftime("%d.%m.%Y")
+                save_setting(f"debt_reminder_{debt_id}", label)
+                await update.message.reply_text(
+                    f"✅ Напомню о долге *{d['name']}* {label}.",
+                    parse_mode="Markdown"
+                )
+            return
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат. Введи дату в формате `ДД.ММ.ГГГГ`\nНапример: `25.04.2025`",
+                parse_mode="Markdown"
+            )
+            context.user_data["debt_date_reminder_id"] = debt_id
+            return
 
     # Частичное погашение долга — ожидаем число
     if "partial_debt_id" in context.user_data:
