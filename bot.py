@@ -268,9 +268,18 @@ def get_sheet():
 def get_all_records():
     return _cached_records("sheet1")
 
+def validate_category(category: str, description: str = "") -> str:
+    """Проверяет что категория валидна. Если нет — исправляет по описанию."""
+    if category in CATEGORIES:
+        return category
+    # Категория невалидна — пробуем исправить по описанию или самой категории
+    combined = (description + " " + category).lower()
+    return fix_category_by_description("Другое", combined)
+
 def save_expense(date, amount, category, description, raw_text):
+    category = validate_category(category, description)
     get_sheet().append_row([date, amount, category, description, raw_text])
-    _invalidate_cache("sheet1")  # сбрасываем кэш после записи
+    _invalidate_cache("sheet1")
 
 def get_sum_key(records):
     if not records:
@@ -387,7 +396,7 @@ def get_smart_comment(category, description, amount, month_records):
     )
     comments = []
     if cat_total > 0:
-        comments.append(f"_{EMOJI_MAP.get(category, '📦')} {category} в этом месяце: *{cat_total:,.0f} ₴*_")
+        comments.append(f"_{get_category_emoji(category)} {category} в этом месяце: *{cat_total:,.0f} ₴*_")
     if desc_count >= 4:
         comments.append(f"_Это уже {desc_count}-я покупка «{description}» в этом месяце 😅_")
     if category == "Никотин" and cat_total > 1500:
@@ -457,7 +466,7 @@ async def handle_quick_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     keyboard = []
     row = []
     for cat in CATEGORIES:
-        emoji = EMOJI_MAP.get(cat, "📦")
+        emoji = get_category_emoji(cat)
         row.append(InlineKeyboardButton(f"{emoji} {cat}", callback_data=f"quick_{cat}_{amount}"))
         if len(row) == 2:
             keyboard.append(row)
@@ -689,7 +698,7 @@ def build_weekly_report():
     lines.append("*По категориям:*")
     for cat, amt in sorted(stats["by_category"].items(), key=lambda x: -x[1]):
         pct = int((amt / stats["total"]) * 100)
-        emoji = EMOJI_MAP.get(cat, "📦")
+        emoji = get_category_emoji(cat)
         lines.append(f"{emoji} {cat}: *{amt:,.0f} ₴* ({pct}%)")
     if stats["by_day"]:
         top_day = max(stats["by_day"], key=stats["by_day"].get)
@@ -716,7 +725,7 @@ def build_monthly_report():
     lines.append("*Топ категории:*")
     for cat, amt in sorted(stats["by_category"].items(), key=lambda x: -x[1])[:5]:
         pct = int((amt / stats["total"]) * 100)
-        emoji = EMOJI_MAP.get(cat, "📦")
+        emoji = get_category_emoji(cat)
         lines.append(f"{emoji} {cat}: *{amt:,.0f} ₴* ({pct}%)")
     if stats["leaks"]:
         lines.append("\n💸 *Частые траты:*")
@@ -787,7 +796,23 @@ def parse_debt(text):
         raw = raw[bracket_start:bracket_end+1]
     return json.loads(raw)
 
-CURRENCY_NAMES = {"UAH": "гривен", "USD": "долларов", "EUR": "евро"}
+def get_category_emoji(cat: str) -> str:
+    """Возвращает смайлик для категории. Если не найден — 🍔 для еды, иначе 📦"""
+    if cat in EMOJI_MAP:
+        return EMOJI_MAP[cat]
+    # Пробуем найти по ключевым словам в названии категории
+    lower = cat.lower()
+    if any(k in lower for k in ["ресторан", "кафе", "еда", "обед", "пицца", "суши"]):
+        return "🍔"
+    if any(k in lower for k in ["такси", "бензин", "транспорт", "авто"]):
+        return "🚗"
+    if any(k in lower for k in ["аптека", "врач", "здоровье"]):
+        return "💊"
+    if any(k in lower for k in ["снюс", "вейп", "сигарет", "никотин"]):
+        return "🚬"
+    if any(k in lower for k in ["игр", "кино", "steam", "развлеч"]):
+        return "🎮"
+    return "📦"
 
 def format_debt_amounts(amounts: list) -> str:
     """Форматирует список сумм в строку: 550 $ + 300 ₴"""
@@ -1121,7 +1146,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [f"📊 *Статистика за {month_name(now.month)}* ({stats['count']} записей)\n"]
         for cat, amt in sorted(stats["by_category"].items(), key=lambda x: -x[1]):
             pct = int((amt / stats["total"]) * 100)
-            lines.append(f"{EMOJI_MAP.get(cat, '📦')} {cat}: *{amt:,.0f} ₴* ({pct}%)")
+            lines.append(f"{get_category_emoji(cat)} {cat}: *{amt:,.0f} ₴* ({pct}%)")
         lines.append(f"\n💰 *Итого: {stats['total']:,.0f} ₴*")
         lines.append(f"📈 Прогноз на месяц: *~{projected:,.0f} ₴*")
         budget_status = get_budget_status(update.effective_chat.id)
@@ -1294,7 +1319,7 @@ def build_past_self_comparison() -> str:
             diff = cur_amt - old_amt
             if abs(diff) < 100:
                 continue
-            emoji = EMOJI_MAP.get(cat, "📦")
+            emoji = get_category_emoji(cat)
             sign = "+" if diff > 0 else ""
             arrow = "📈" if diff > 0 else "📉"
             lines.append(f"{emoji} {cat}: {arrow} {sign}{diff:,.0f} ₴")
@@ -1474,7 +1499,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines = [f"📊 *Статистика за {month_name(now.month)}* ({stats['count']} записей)\n"]
                 for cat, amt in sorted(stats["by_category"].items(), key=lambda x: -x[1]):
                     pct = int((amt / stats["total"]) * 100)
-                    lines.append(f"{EMOJI_MAP.get(cat, '📦')} {cat}: *{amt:,.0f} ₴* ({pct}%)")
+                    lines.append(f"{get_category_emoji(cat)} {cat}: *{amt:,.0f} ₴* ({pct}%)")
                 lines.append(f"\n💰 *Итого: {stats['total']:,.0f} ₴*")
                 lines.append(f"📈 Прогноз на месяц: *~{projected:,.0f} ₴*")
                 budget_status = get_budget_status(chat_id)
@@ -1576,7 +1601,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             date = datetime.now().strftime("%d.%m.%Y %H:%M")
             save_expense(date, amount, category, "быстрая запись", str(amount))
             update_memory("", category)
-            emoji = EMOJI_MAP.get(category, "📦")
+            emoji = get_category_emoji(category)
             await query.edit_message_text(
                 f"⚡ *{amount:,.0f} ₴* → {emoji} {category}\n✅ Записано!",
                 parse_mode="Markdown"
