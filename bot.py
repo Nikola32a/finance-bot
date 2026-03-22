@@ -709,7 +709,7 @@ def build_debts_message():
     if not active:
         return "✅ Активных долгов нет!"
     lines = ["💸 *Активные долги:*\n"]
-    uah_total = 0.0
+    totals = defaultdict(float)  # {currency: total}
     for debt_id, d in active.items():
         days_ago = (datetime.now() - datetime.strptime(d["date"], "%d.%m.%Y")).days
         note_str = f" — _{d['note']}_" if d.get("note") else ""
@@ -717,12 +717,18 @@ def build_debts_message():
         amt_str = format_debt_amounts(amounts)
         lines.append(f"👤 *{d['name']}* — {amt_str}{note_str}")
         lines.append(f"   📅 {d['date']} ({days_ago} дн. назад)")
-        # Считаем только гривны для итога
         for a in amounts:
-            if a.get("currency", "UAH") == "UAH":
-                uah_total += float(a["amount"])
-    if uah_total > 0:
-        lines.append(f"\n💰 *Итого в гривнах: {uah_total:,.0f} ₴*")
+            cur = a.get("currency", "UAH")
+            totals[cur] += float(a["amount"])
+
+    if totals:
+        lines.append("")
+        # Порядок: USD, EUR, UAH
+        for cur in ["USD", "EUR", "UAH"]:
+            if cur in totals:
+                sym = CURRENCY_SYMBOLS.get(cur, "₴")
+                lines.append(f"💰 Итого в {sym}: *{totals[cur]:,.0f} {sym}*")
+
     return "\n".join(lines)
 
 async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
@@ -1718,50 +1724,185 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             )
             return
 
-    # Запись долга
-    debt_keywords = ["дал в долг", "одолжил", "дала в долг", "дав в борг", "позичив", "долг"]
-    if any(kw in lower for kw in debt_keywords):
+    # Распознавание возврата долга голосом: «папа отдал 200 долларов»
+    return_keywords = ["отдал", "вернул", "отдала", "вернула", "погасил", "погасила",
+                       "расплатился", "расплатилась", "отдав", "повернув"]
+    if any(kw in lower for kw in return_keywords):
         try:
             parsed = parse_debt(text)
             amounts = parsed.get("amounts", [])
-            # Поддержка старого формата
             if not amounts and parsed.get("amount"):
                 amounts = [{"amount": float(parsed["amount"]), "currency": "UAH"}]
 
             if amounts and parsed.get("name"):
-                debt_counter[0] += 1
-                debt_id = str(debt_counter[0])
-                date_str = datetime.now().strftime("%d.%m.%Y")
-                debts[debt_id] = {
-                    "name": parsed["name"],
-                    "amounts": amounts,
-                    "date": date_str,
-                    "note": parsed.get("note", "")
-                }
-                # Для совместимости с таблицей сохраняем строку сумм
-                amounts_str = " + ".join(
-                    f"{a['amount']} {CURRENCY_SYMBOLS.get(a.get('currency','UAH'),'₴')}"
-                    for a in amounts
-                )
-                save_debt_to_sheet(debt_id, parsed["name"], amounts_str, date_str, parsed.get("note", ""))
+                name = parsed["name"].lower()
+                # Ищем долг с таким именем
+                existing_id = None
+                for did, d in debts.items():
+                    if d["name"].lower() == name or name in d["name"].lower():
+                        existing_id = did
+                        break
 
-                chat_id = update.effective_chat.id
-                context.job_queue.run_once(
-                    send_debt_reminder,
-                    when=timedelta(weeks=2),
-                    data={"debt_id": debt_id, "chat_id": chat_id},
-                    name=f"debt_{debt_id}"
-                )
-                note_str = f"\n📝 {parsed['note']}" if parsed.get("note") else ""
-                amt_str = format_debt_amounts(amounts)
-                await update.message.reply_text(
-                    f"💸 *Долг записан!*\n\n"
-                    f"👤 Кому: *{parsed['name']}*\n"
-                    f"💰 Сумма: {amt_str}{note_str}\n\n"
-                    f"⏰ Напомню через 2 недели если не вернут.",
-                    parse_mode="Markdown"
-                )
+                if not existing_id:
+                    await update.message.reply_text(
+                        f"🤔 Не нашёл активного долга для *{parsed['name']}*.",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                d = debts[existing_id]
+                existing_amounts = d.get("amounts", [])
+                lines = [f"💰 *{d['name']}* вернул:\n"]
+                fully_paid_currencies = []
+
+                for ret_a in amounts:
+                    cur = ret_a.get("currency", "UAH")
+                    ret_amt = float(ret_a["amount"])
+                    sym = CURRENCY_SYMBOLS.get(cur, "₴")
+
+                    # Ищем эту валюту в долге
+                    found = False
+                    for ex_a in existing_amounts:
+                        if ex_a.get("currency", "UAH") == cur:
+                            found = True
+                            old_amt = float(ex_a["amount"])
+                            new_amt = old_amt - ret_amt
+                            if new_amt <= 0:
+                                fully_paid_currencies.append(cur)
+                                lines.append(f"✅ {sym}: закрыто полностью")
+                            else:
+                                ex_a["amount"] = new_amt
+                                lines.append(f"💸 {sym}: {ret_amt:,.0f} → остаток *{new_amt:,.0f} {sym}*")
+                            break
+
+                    if not found:
+                        lines.append(f"🤔 Долга в {sym} не найдено")
+
+                # Убираем полностью погашенные валюты
+                existing_amounts = [
+                    a for a in existing_amounts
+                    if a.get("currency", "UAH") not in fully_paid_currencies
+                ]
+
+                if not existing_amounts:
+                    # Долг полностью закрыт
+                    debts.pop(existing_id)
+                    mark_debt_paid_in_sheet(existing_id)
+                    lines.append(f"\n🎉 *Долг полностью закрыт!*")
+                else:
+                    debts[existing_id]["amounts"] = existing_amounts
+                    new_amounts_str = " + ".join(
+                        f"{a['amount']} {CURRENCY_SYMBOLS.get(a.get('currency','UAH'),'₴')}"
+                        for a in existing_amounts
+                    )
+                    update_debt_amounts_in_sheet(existing_id, new_amounts_str)
+                    lines.append(f"\n📊 Остаток: {format_debt_amounts(existing_amounts)}")
+
+                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
                 return
+
+        except Exception as e:
+            logger.error(f"Return debt error: {e}")
+
+    # Запись долга / дозапись к существующему
+    debt_keywords = ["дал в долг", "одолжил", "дала в долг", "дав в борг", "позичив", "долг"]
+    add_keywords = ["ещё", "еще", "плюс", "добав", "доплат", "дополнительно"]
+    is_debt = any(kw in lower for kw in debt_keywords)
+    is_add = any(kw in lower for kw in add_keywords)
+
+    if is_debt or is_add:
+        try:
+            parsed = parse_debt(text)
+            amounts = parsed.get("amounts", [])
+            if not amounts and parsed.get("amount"):
+                amounts = [{"amount": float(parsed["amount"]), "currency": "UAH"}]
+
+            if amounts and parsed.get("name"):
+                name = parsed["name"].lower()
+
+                # Ищем существующий долг с таким именем
+                existing_id = None
+                for did, d in debts.items():
+                    if d["name"].lower() == name or name in d["name"].lower():
+                        existing_id = did
+                        break
+
+                if existing_id and is_add:
+                    # Дозаписываем к существующему долгу
+                    d = debts[existing_id]
+                    existing_amounts = d.get("amounts", [])
+                    for new_a in amounts:
+                        cur = new_a.get("currency", "UAH")
+                        # Ищем ту же валюту — суммируем
+                        found = False
+                        for ex_a in existing_amounts:
+                            if ex_a.get("currency", "UAH") == cur:
+                                ex_a["amount"] = float(ex_a["amount"]) + float(new_a["amount"])
+                                found = True
+                                break
+                        if not found:
+                            existing_amounts.append(new_a)
+                    debts[existing_id]["amounts"] = existing_amounts
+
+                    # Обновляем в таблице
+                    amounts_str = " + ".join(
+                        f"{a['amount']} {CURRENCY_SYMBOLS.get(a.get('currency','UAH'),'₴')}"
+                        for a in existing_amounts
+                    )
+                    update_debt_amounts_in_sheet(existing_id, amounts_str)
+
+                    added_str = format_debt_amounts(amounts)
+                    total_str = format_debt_amounts(existing_amounts)
+                    await update.message.reply_text(
+                        f"➕ *Добавлено к долгу {d['name']}*\n\n"
+                        f"Добавлено: {added_str}\n"
+                        f"💰 Итого: {total_str}",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                elif is_debt:
+                    # Создаём новый долг
+                    debt_counter[0] += 1
+                    debt_id = str(debt_counter[0])
+                    date_str = datetime.now().strftime("%d.%m.%Y")
+                    debts[debt_id] = {
+                        "name": parsed["name"],
+                        "amounts": amounts,
+                        "date": date_str,
+                        "note": parsed.get("note", "")
+                    }
+                    amounts_str = " + ".join(
+                        f"{a['amount']} {CURRENCY_SYMBOLS.get(a.get('currency','UAH'),'₴')}"
+                        for a in amounts
+                    )
+                    save_debt_to_sheet(debt_id, parsed["name"], amounts_str, date_str, parsed.get("note", ""))
+                    chat_id = update.effective_chat.id
+                    context.job_queue.run_once(
+                        send_debt_reminder,
+                        when=timedelta(weeks=2),
+                        data={"debt_id": debt_id, "chat_id": chat_id},
+                        name=f"debt_{debt_id}"
+                    )
+                    note_str = f"\n📝 {parsed['note']}" if parsed.get("note") else ""
+                    amt_str = format_debt_amounts(amounts)
+                    await update.message.reply_text(
+                        f"💸 *Долг записан!*\n\n"
+                        f"👤 Кому: *{parsed['name']}*\n"
+                        f"💰 Сумма: {amt_str}{note_str}\n\n"
+                        f"⏰ Напомню через 2 недели если не вернут.",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                elif is_add and not existing_id:
+                    await update.message.reply_text(
+                        f"🤔 Не нашёл активного долга для *{parsed['name']}*.\n"
+                        f"Сначала создай долг: «Дал в долг {parsed['name']} ...»",
+                        parse_mode="Markdown"
+                    )
+                    return
+
         except Exception as e:
             logger.error(f"Debt parse error: {e}")
 
