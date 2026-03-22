@@ -309,6 +309,32 @@ def get_week_records():
             continue
     return result
 
+DESCRIPTION_CATEGORY_FIX = {
+    "ресторан": "Еда / продукты", "кафе": "Еда / продукты",
+    "кофе": "Еда / продукты", "обед": "Еда / продукты",
+    "ужин": "Еда / продукты", "завтрак": "Еда / продукты",
+    "пицца": "Еда / продукты", "суши": "Еда / продукты",
+    "бургер": "Еда / продукты", "фастфуд": "Еда / продукты",
+    "доставка": "Еда / продукты", "glovo": "Еда / продукты",
+    "продукты": "Еда / продукты", "магазин": "Еда / продукты",
+    "алкоголь": "Еда / продукты", "пиво": "Еда / продукты",
+    "такси": "Транспорт", "uber": "Транспорт", "bolt": "Транспорт",
+    "бензин": "Транспорт", "заправка": "Транспорт", "мойка": "Транспорт",
+    "снюс": "Никотин", "вейп": "Никотин", "сигарет": "Никотин",
+    "steam": "Развлечения", "кино": "Развлечения", "netflix": "Развлечения",
+    "аптека": "Здоровье / аптека", "врач": "Здоровье / аптека",
+}
+
+def fix_category_by_description(cat: str, desc: str) -> str:
+    """Исправляет неверную категорию на основе описания"""
+    if cat != "Другое":
+        return cat
+    lower = desc.lower()
+    for keyword, correct_cat in DESCRIPTION_CATEGORY_FIX.items():
+        if keyword in lower:
+            return correct_cat
+    return cat
+
 def analyze_records(records):
     if not records:
         return None
@@ -323,6 +349,8 @@ def analyze_records(records):
         cat = r.get("Категория", "Другое")
         desc = r.get("Описание", "").lower()
         date_str = r.get("Дата", "")
+        # Исправляем категорию по описанию если записано как "Другое"
+        cat = fix_category_by_description(cat, desc)
         by_category[cat] += amt
         if date_str:
             try:
@@ -2068,8 +2096,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             description = exp.get("description", "—")
             description_with_emoji = add_emoji_to_description(description)
             save_expense(date, amount, category, description, text)
-            emoji = EMOJI_MAP.get(category, "📦")
-            lines.append(f"{emoji} {description_with_emoji} — *{amount:,.0f} ₴* ({category})")
+            lines.append(f"{description_with_emoji} — *{amount:,.0f} ₴* ({category})")
             # Обновляем память
             update_memory(description, category)
 
