@@ -1466,7 +1466,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     load_settings()
-    load_memory()
     load_debts()
     load_goals()
     load_user_categories()
