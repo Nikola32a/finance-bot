@@ -85,11 +85,6 @@ def _worksheet_get_or_create(sp, name):
     try: return sp.worksheet(name)
     except: return sp.add_worksheet(title=name, rows=200, cols=10)
 
-def _worksheet_exists(sp, name):
-    try: sp.worksheet(name); return True
-    except: return False
-
-def _invalidate(name="sheet1"):
     _records_cache.pop(name, None)
 
 def _cached_records(name="sheet1") -> list:
@@ -154,10 +149,13 @@ def load_user_categories():
         try: _user_categories.extend(json.loads(val))
         except: pass
 
-def save_user_category(cat: str):
+def save_user_category(cat: str, emoji: str = ""):
     if cat not in _user_categories:
         _user_categories.append(cat)
         save_setting("user_categories", json.dumps(_user_categories))
+    # Сохраняем эмодзи если передан или вычисляем автоматически
+    if cat not in EMOJI_MAP:
+        EMOJI_MAP[cat] = emoji if emoji else get_category_emoji(cat)
 
 # ── РАСХОДЫ ──────────────────────────────────────────────────────────────────
 def get_sheet():
@@ -253,33 +251,39 @@ def analyze_records(records: list) -> dict | None:
 
 def get_category_emoji(cat: str) -> str:
     if cat in EMOJI_MAP: return EMOJI_MAP[cat]
-    # Мягкий поиск по части слова
     low = cat.lower()
     emoji_hints = [
-        (["еда","продукт","кафе","ресторан","обед","пицца","суши","фаст"],"🍔"),
-        (["транспорт","такси","бензин","авто","машин","метро","автобус"],"🚗"),
-        (["развлеч","игр","кино","steam","netflix","spotify","боулинг"],"🎮"),
-        (["здоров","аптека","врач","медиц","стоматолог","фитнес","спортзал"],"💊"),
-        (["никотин","снюс","вейп","сигарет","кальян"],"🚬"),
-        (["одежда","обувь","шопинг"],"👕"),
-        (["коммунальн","квартир","жкх","аренд"],"🏠"),
-        (["подписк","netflix","spotify","apple"],"📺"),
-        (["образован","курс","книг","учеб"],"📚"),
-        (["путешеств","отпуск","авиа","билет","гостиниц"],"✈️"),
-        (["спорт","трениров","зал","фитнес"],"💪"),
+        (["еда","продукт","кафе","ресторан","обед","пицца","суши","фаст","кухн","готовк"],"🍔"),
+        (["транспорт","такси","бензин","авто","машин","метро","автобус","мойк","запчаст"],"🚗"),
+        (["развлеч","игр","кино","steam","netflix","spotify","боулинг","клуб","концерт"],"🎮"),
+        (["здоров","аптека","врач","медиц","стоматолог","фитнес","спортзал","массаж","парикм","маникюр"],"💊"),
+        (["никотин","снюс","вейп","сигарет","кальян","zyn","velo"],"🚬"),
+        (["одежда","обувь","шопинг","одягу"],"👕"),
+        (["коммунальн","квартир","жкх","аренд","ипотек","кварплат"],"🏠"),
+        (["подписк","netflix","spotify","apple","google","онлайн"],"📺"),
+        (["образован","курс","книг","учеб","навчан","репетитор","школ","универ","институт"],"📚"),
+        (["путешеств","отпуск","авиа","билет","гостиниц","туризм","відпочин"],"✈️"),
+        (["спорт","трениров","зал","фитнес","йога","бассейн"],"💪"),
+        (["инвест","акци","крипт","накоплен","сбереж"],"📈"),
+        (["кафе","ресторан","бар","суши","пицца"],"🍽"),
+        (["подарок","подарун","праздник","день рожден"],"🎁"),
+        (["ремонт","стройк","инструмент","материал"],"🔧"),
+        (["связь","телефон","интернет","мобільн"],"📱"),
+        (["домашн","питомц","кот","собак","животн"],"🐾"),
+        (["красот","косметик","уход","парфюм"],"💄"),
+        (["ресторан","обед","ужин","завтрак"],"🍽"),
+        (["алкогол","пиво","вино","бар"],"🍺"),
     ]
     for keywords, emoji in emoji_hints:
         if any(k in low for k in keywords):
             return emoji
-    return "📦"
+    # Для совсем неизвестных — пробуем угадать по первой букве
+    first = low[0] if low else ""
+    misc = {"а":"🅰️","б":"💼","в":"💡","г":"🏪","д":"📋","е":"⚡","з":"🔑","и":"💎","к":"🛍",
+            "л":"🌿","м":"🎯","н":"🔔","о":"⭕","п":"📦","р":"🔴","с":"⭐","т":"🏷","у":"🎓",
+            "ф":"🔵","х":"🏠","ц":"💰","ч":"⏰","ш":"🛒","э":"⚙️","ю":"🌍","я":"🧩"}
+    return misc.get(first, "📦")
 
-def add_emoji_to_desc(desc: str, emoji_hint: str = "") -> str:
-    """Возвращает описание с эмодзи. Приоритет — эмодзи от ИИ, затем авто-поиск"""
-    if emoji_hint:
-        return f"{emoji_hint} {desc}"
-    return desc
-
-def month_name(n: int, gen=False) -> str:
     return (MONTH_NAMES_GEN if gen else MONTH_NAMES)[n-1]
 
 def fmt(amt: float) -> str:
@@ -288,22 +292,7 @@ def fmt(amt: float) -> str:
 # ── ПАМЯТЬ ───────────────────────────────────────────────────────────────────
 memory: dict = {}
 
-def load_memory():
-    val = get_setting("user_memory")
-    if val:
-        try: memory.update(json.loads(val))
-        except: pass
 
-# ── ПАМЯТЬ (устарела — ИИ сам определяет категории) ──────────────────────────
-memory: dict = {}  # оставляем для совместимости с load_settings
-
-def load_memory():
-    pass  # больше не нужна — ИИ понимает контекст без словаря
-
-def update_memory(keyword: str, category: str):
-    pass  # ИИ не нуждается в обучении по ключевым словам
-
-# ── БЮДЖЕТ ───────────────────────────────────────────────────────────────────
 def get_budget_status(chat_id):
     val = get_setting(f"budget_{chat_id}")
     if not val: return None
@@ -435,6 +424,10 @@ def build_goals_msg() -> str:
 # ── КУРС ВАЛЮТ НБУ (НОВОЕ) ────────────────────────────────────────────────────
 _rates_cache: dict = {}
 _rates_ts: float = 0
+_mono_cache: dict = {}
+_mono_ts: float = 0
+_obmen_cache: dict = {}
+_obmen_ts: float = 0
 
 async def fetch_nbu_rates() -> dict:
     global _rates_cache, _rates_ts
@@ -459,17 +452,74 @@ async def convert_to_uah(amount: float, currency: str) -> float:
     rate = rates.get(currency, 1.0)
     return amount * rate
 
+async def fetch_monobank_rates() -> dict:
+    global _mono_cache, _mono_ts
+    now = datetime.now().timestamp()
+    if _mono_cache and now - _mono_ts < 600:
+        return _mono_cache
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get("https://api.monobank.ua/bank/currency")
+            data = resp.json()
+            result = {}
+            for item in data:
+                if item.get("currencyCodeB") == 980:
+                    code_a = item.get("currencyCodeA")
+                    if code_a == 840: result["USD"] = item
+                    elif code_a == 978: result["EUR"] = item
+            _mono_cache = result
+            _mono_ts = now
+            return result
+    except Exception as e:
+        logger.error(f"monobank rates: {e}")
+        return {}
+
+async def fetch_obmen_rates() -> dict:
+    """Курс обменников с obmen.ua (агрегатор)"""
+    global _obmen_cache, _obmen_ts
+    now = datetime.now().timestamp()
+    if _obmen_cache and now - _obmen_ts < 600:
+        return _obmen_cache
+    try:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+            resp = await client.get("https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5")
+            data = resp.json()
+            result = {}
+            for item in data:
+                ccy = item.get("ccy","")
+                if ccy in ("USD","EUR"):
+                    result[ccy] = {
+                        "buy": float(item.get("buy", 0)),
+                        "sale": float(item.get("sale", 0)),
+                    }
+            _obmen_cache = result
+            _obmen_ts = now
+            return result
+    except Exception as e:
+        logger.error(f"obmen rates (privat): {e}")
+        return {}
+
 async def build_rates_msg() -> str:
-    rates = await fetch_nbu_rates()
-    usd = rates.get("USD", 0)
-    eur = rates.get("EUR", 0)
-    gbp = rates.get("GBP", 0)
-    lines = [
-        "💱 *Курс НБУ (актуальный):*\n",
-        f"🇺🇸 USD: *{usd:.2f} ₴*",
-        f"🇪🇺 EUR: *{eur:.2f} ₴*",
-        f"🇬🇧 GBP: *{gbp:.2f} ₴*",
-    ]
+    nbu, mono, obmen = await asyncio.gather(
+        fetch_nbu_rates(), fetch_monobank_rates(), fetch_obmen_rates()
+    )
+    now = datetime.now().strftime("%H:%M")
+    lines = [f"💱 *Курс валют* _{now}_\n"]
+
+    for cur, flag in [("USD","🇺🇸"), ("EUR","🇪🇺")]:
+        lines.append(f"{flag} *{cur}*")
+        nbu_rate = nbu.get(cur, 0)
+        if nbu_rate: lines.append(f"  🏛 НБУ: *{nbu_rate:.2f} ₴*")
+        mono_d = mono.get(cur, {})
+        if mono_d.get("rateBuy") and mono_d.get("rateSell"):
+            lines.append(f"  🟢 Моно: купить *{mono_d['rateBuy']:.2f}* · продать *{mono_d['rateSell']:.2f}*")
+        ob_d = obmen.get(cur, {})
+        if ob_d.get("buy") and ob_d.get("sale"):
+            lines.append(f"  🔵 Приват: купить *{ob_d['buy']:.2f}* · продать *{ob_d['sale']:.2f}*")
+        lines.append("")
+
+    gbp = nbu.get("GBP", 0)
+    if gbp: lines.append(f"🇬🇧 *GBP* — НБУ: *{gbp:.2f} ₴*")
     return "\n".join(lines)
 
 # ── КОНТЕКСТ РАЗГОВОРА ───────────────────────────────────────────────────────
@@ -581,587 +631,6 @@ async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
         text=f"⏰ *Напоминание о долге*\n\n👤 *{d['name']}* должен {format_amounts(ams)}",
         parse_mode="Markdown", reply_markup=kb)
 
-# ── GROQ ─────────────────────────────────────────────────────────────────────
-def transcribe(path: str) -> str:
-    with open(path, "rb") as f:
-        return groq_client.audio.transcriptions.create(
-            model="whisper-large-v3", file=f, language="ru").text
-
-def _llm(messages: list, max_tokens=600, temperature=0.0) -> str:
-    """Базовый вызов LLM. temperature=0 для парсинга, выше — для чата."""
-    r = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
-    return r.choices[0].message.content.strip()
-
-def _extract_json(raw: str, bracket="[") -> str:
-    """Вырезает первый валидный JSON из ответа модели. Надёжно обрезает мусор после."""
-    close = "]" if bracket == "[" else "}"
-    raw = raw.replace("```json","").replace("```","").strip()
-    s = raw.find(bracket)
-    if s == -1: return raw
-    # Считаем вложенность скобок чтобы найти точное закрытие
-    depth = 0
-    open_b = bracket
-    for i, ch in enumerate(raw[s:], start=s):
-        if ch == open_b: depth += 1
-        elif ch == close:
-            depth -= 1
-            if depth == 0:
-                return raw[s:i+1]
-    return raw[s:]
-
-def groq_chat(messages: list, max_tokens=800) -> str:
-    return _llm(messages, max_tokens=max_tokens, temperature=0.7)
-
-# ── УМНЫЙ ПАРСЕР РАСХОДОВ ────────────────────────────────────────────────────
-PARSE_SYSTEM = """Ты — парсер финансовых записей. Твоя задача: извлечь ВСЕ траты из сообщения пользователя.
-
-КАТЕГОРИИ (выбирай наиболее подходящую по смыслу):
-- "Еда / продукты" — любая еда, напитки, рестораны, кафе, доставка, продуктовые магазины, алкоголь
-- "Транспорт" — бензин, заправки, такси, каршеринг, парковка, мойка, СТО, запчасти, метро, автобус
-- "Развлечения" — игры, кино, стриминг, подписки на развлечения, ставки, боулинг, клубы, концерты
-- "Здоровье / аптека" — лекарства, аптека, врачи, стоматолог, анализы, массаж, парикмахер, маникюр, педикюр, спортзал, фитнес
-- "Никотин" — сигареты, снюс, вейп, кальян, ZYN, VELO и любые никотиновые продукты
-- "Другое" — всё остальное: одежда, техника, коммунальные, интернет, телефон, подарки, ремонт
-
-ПРАВИЛА ПАРСИНГА:
-1. Ищи ВСЕ суммы в тексте — даже если написано "потратил", "заплатил", "купил", "вышло"
-2. Понимай контекст: "взял кофе 85" = Еда, "закинул на карту 500" = НЕ трата (пропусти)
-3. Понимай сокращения и разговорный язык: "шаурма 120", "синька 200", "ашан 3к", "комуналка 1500"
-4. "к" или "тыс" = тысячи: "3к" = 3000, "1.5к" = 1500
-5. Если несколько трат через запятую/и/плюс — создай отдельный объект для каждой
-6. description — короткое название (2-4 слова), что именно куплено
-7. emoji — один подходящий эмодзи для описания
-8. Если текст НЕ про расходы (вопрос, команда, разговор) — верни пустой массив []
-
-ФОРМАТ ОТВЕТА — ТОЛЬКО JSON, никакого текста вокруг:
-[{"amount": <число>, "category": "<категория>", "description": "<что купил>", "emoji": "<эмодзи>"}]"""
-
-PARSE_EXAMPLES = [
-    {"role":"user","content":"снюс 800"},
-    {"role":"assistant","content":'[{"amount":800,"category":"Никотин","description":"снюс","emoji":"🚬"}]'},
-    {"role":"user","content":"зашёл в атб, взял еды и воды, вышло 340"},
-    {"role":"assistant","content":'[{"amount":340,"category":"Еда / продукты","description":"ATБ продукты","emoji":"🛒"}]'},
-    {"role":"user","content":"мойка 350, залил бензин 1200"},
-    {"role":"assistant","content":'[{"amount":350,"category":"Транспорт","description":"мойка машины","emoji":"🚿"},{"amount":1200,"category":"Транспорт","description":"бензин","emoji":"⛽"}]'},
-    {"role":"user","content":"купил кроссовки за 2к и носки за 150"},
-    {"role":"assistant","content":'[{"amount":2000,"category":"Другое","description":"кроссовки","emoji":"👟"},{"amount":150,"category":"Другое","description":"носки","emoji":"🧦"}]'},
-    {"role":"user","content":"сколько я потратил на еду?"},
-    {"role":"assistant","content":"[]"},
-    {"role":"user","content":"пополнил счёт 500"},
-    {"role":"assistant","content":"[]"},
-    {"role":"user","content":"стоматолог 1800"},
-    {"role":"assistant","content":'[{"amount":1800,"category":"Здоровье / аптека","description":"стоматолог","emoji":"🦷"}]'},
-    {"role":"user","content":"netflix 199, spotify 99, купил донат в игре 300"},
-    {"role":"assistant","content":'[{"amount":199,"category":"Развлечения","description":"Netflix подписка","emoji":"🎬"},{"amount":99,"category":"Развлечения","description":"Spotify подписка","emoji":"🎵"},{"amount":300,"category":"Развлечения","description":"донат в игре","emoji":"🎮"}]'},
-    {"role":"user","content":"коммуналка 2400"},
-    {"role":"assistant","content":'[{"amount":2400,"category":"Другое","description":"коммунальные услуги","emoji":"🏠"}]'},
-    {"role":"user","content":"обед с клиентом 850, такси туда-обратно 280"},
-    {"role":"assistant","content":'[{"amount":850,"category":"Еда / продукты","description":"бизнес-обед","emoji":"🍽"},{"amount":280,"category":"Транспорт","description":"такси","emoji":"🚕"}]'},
-]
-
-def parse_expenses(text: str) -> list:
-    """
-    Умный ИИ-парсер трат. Понимает контекст, сленг, сокращения.
-    Без единого hardcoded ключевого слова.
-    """
-    user_cats = _user_categories
-    system = PARSE_SYSTEM
-    if user_cats:
-        system += f"\n\nДОПОЛНИТЕЛЬНЫЕ КАТЕГОРИИ ПОЛЬЗОВАТЕЛЯ: {', '.join(user_cats)}"
-
-    messages = [{"role":"system","content":system}]
-    messages.extend(PARSE_EXAMPLES)
-    messages.append({"role":"user","content":text})
-
-    try:
-        raw = _llm(messages, max_tokens=500, temperature=0.0)
-        raw = _extract_json(raw, "[")
-        result = json.loads(raw)
-        if isinstance(result, dict): result = [result]
-        # Валидация: убираем записи без amount или с нулём
-        validated = []
-        for item in result:
-            try:
-                amt = float(str(item.get("amount","0")).replace(",",".").replace("к","000").replace("k","000"))
-                if amt <= 0: continue
-                item["amount"] = amt
-                item["category"] = fix_cat(item.get("category","Другое"))
-                validated.append(item)
-            except: continue
-        return validated
-    except Exception as e:
-        logger.error(f"parse_expenses error: {e} | raw: {raw if 'raw' in dir() else '?'}")
-        # Fallback: хотя бы вытащи числа
-        nums = re.findall(r'\b(\d[\d\s]*(?:[.,]\d+)?)\s*(?:к|тыс|грн|₴|uah)?\b', text.lower())
-        if nums:
-            amount_str = nums[0].replace(" ","").replace(",",".")
-            try:
-                amount = float(amount_str) * (1000 if "к" in text.lower() or "тыс" in text.lower() else 1)
-                return [{"amount": amount, "category": "Другое", "description": text[:40], "emoji": "📦"}]
-            except: pass
-        return []
-
-def parse_debt(text: str, context_name: str = "") -> dict:
-    """
-    Парсит долг из текста. context_name — имя из предыдущего сообщения (если есть).
-    Если несколько сумм одному человеку — суммирует в один долг.
-    """
-    ctx = f'\nКонтекст: предыдущее сообщение было про "{context_name}", используй это имя если в тексте нет другого.' if context_name else ""
-    messages = [
-        {"role":"system","content":f"""Извлеки информацию о долге из текста.{ctx}
-
-Верни ТОЛЬКО JSON без markdown:
-{{"name":"<имя человека>","amounts":[{{"amount":<число>,"currency":"<UAH|USD|EUR>"}}],"note":"<за что или пусто>"}}
-
-Правила:
-- name: только имя (Папа, Саша, Вася) — без слов "долг", "дал" и т.д.
-- Если несколько сумм одному человеку ("папа 200 и ещё 800") — СЛОЖИ их в одну: amount=1000
-- Валюта: гривна/грн/₴=UAH, доллар/бакс/$=USD, евро/€=EUR. Без валюты=UAH
-- amounts всегда массив
-
-Примеры:
-"дал папе 200" → {{"name":"Папа","amounts":[{{"amount":200,"currency":"UAH"}}],"note":""}}
-"папа 200 и ещё 800" → {{"name":"Папа","amounts":[{{"amount":1000,"currency":"UAH"}}],"note":""}}
-"одолжил Саше 50 баксов на еду" → {{"name":"Саша","amounts":[{{"amount":50,"currency":"USD"}}],"note":"на еду"}}"""},
-        {"role":"user","content":text},
-    ]
-    try:
-        raw = _llm(messages, max_tokens=250, temperature=0.0)
-        raw = _extract_json(raw, "{")
-        result = json.loads(raw)
-        # Нормализация имени
-        if result.get("name"):
-            result["name"] = result["name"].strip().capitalize()
-        return result
-    except Exception as e:
-        logger.error(f"parse_debt: {e} | text: {text}")
-        return {}
-
-def parse_goal(text: str) -> dict | None:
-    messages = [
-        {"role":"system","content":"""Извлеки финансовую цель из текста.
-Верни ТОЛЬКО JSON без markdown:
-{"name":"<название цели>","amount":<целевая сумма>,"emoji":"<подходящий эмодзи>"}
-Примеры: "Цель iPhone 25000" → {"name":"iPhone","amount":25000,"emoji":"📱"}
-"хочу накопить на машину 200к" → {"name":"Машина","amount":200000,"emoji":"🚗"}"""},
-        {"role":"user","content":text},
-    ]
-    try:
-        raw = _llm(messages, max_tokens=150, temperature=0.0)
-        raw = _extract_json(raw, "{")
-        result = json.loads(raw)
-        if result.get("amount"): return result
-    except Exception as e:
-        logger.error(f"parse_goal: {e}")
-    return None
-
-# ── ИИ ФИНАНСОВЫЙ СОВЕТНИК (НОВОЕ) ────────────────────────────────────────────
-# История чата per chat_id
-_ai_chat_history: dict = {}
-
-def get_financial_context(chat_id) -> str:
-    """Собирает финансовый контекст для ИИ"""
-    recs = get_current_month_records()
-    s = analyze_records(recs)
-    bs = get_budget_status(chat_id)
-    sal = get_salary_info(chat_id)
-    
-    parts = [f"Сегодня: {datetime.now().strftime('%d.%m.%Y')}"]
-    
-    if s:
-        parts.append(f"Траты за {month_name(datetime.now().month)}: {fmt(s['total'])} ₴")
-        cats = "; ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1])[:4])
-        parts.append(f"По категориям: {cats}")
-    
-    if bs:
-        parts.append(f"Бюджет: {fmt(bs['budget'])}₴, потрачено {bs['percent']}%, осталось {fmt(bs['left'])}₴")
-    
-    if sal:
-        parts.append(f"Зарплата: {sal.get('amount','?')}₴, {sal['day']}-е число")
-    
-    if debts:
-        debt_list = "; ".join(f"{d['name']}: {format_amounts(d['amounts']).replace('*','')}" for d in list(debts.values())[:3])
-        parts.append(f"Активные долги: {debt_list}")
-    
-    if goals:
-        goal_list = "; ".join(f"{g['name']}: {fmt(g['saved'])}/{fmt(g['target'])}₴" for g in list(goals.values())[:3])
-        parts.append(f"Финансовые цели: {goal_list}")
-    
-    return "\n".join(parts)
-
-async def ai_chat_response(chat_id, user_message: str) -> str:
-    """ИИ-агент с памятью финансового контекста"""
-    if chat_id not in _ai_chat_history:
-        _ai_chat_history[chat_id] = []
-    
-    history = _ai_chat_history[chat_id]
-    financial_ctx = get_financial_context(chat_id)
-    
-    system = f"""Ты умный финансовый ИИ-ассистент в Telegram боте. Помогаешь анализировать расходы, давать советы, отвечать на вопросы о финансах.
-    
-ТЕКУЩИЕ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ:
-{financial_ctx}
-
-Правила:
-- Отвечай кратко и по делу (до 5 предложений)
-- Используй данные пользователя в ответах
-- Будь дружелюбным, используй эмодзи
-- Отвечай на русском языке
-- Если спрашивают о конкретных цифрах — используй данные выше
-- Давай практичные советы"""
-
-    messages = [{"role":"system","content":system}]
-    # Последние 6 сообщений истории
-    messages.extend(history[-6:])
-    messages.append({"role":"user","content":user_message})
-    
-    try:
-        response = groq_chat(messages)
-        history.append({"role":"user","content":user_message})
-        history.append({"role":"assistant","content":response})
-        if len(history) > 20:
-            _ai_chat_history[chat_id] = history[-20:]
-        return response
-    except Exception as e:
-        logger.error(f"ai_chat: {e}")
-        return "🤔 Не могу ответить сейчас. Попробуй чуть позже!"
-
-# ── ОТЧЁТЫ ───────────────────────────────────────────────────────────────────
-def _cat_lines(stats, limit=None) -> list:
-    items = sorted(stats["by_category"].items(), key=lambda x:-x[1])
-    if limit: items = items[:limit]
-    lines = []
-    for cat, amt in items:
-        pct = int(amt / stats["total"] * 100)
-        lines.append(f"{get_category_emoji(cat)} {cat}: *{fmt(amt)} ₴* ({pct}%)")
-    return lines
-
-def _leak_lines(stats) -> list:
-    if not stats.get("leaks"): return []
-    lines = ["\n💸 *Частые траты:*"]
-    for desc, d in list(stats["leaks"].items())[:3]:
-        lines.append(f"• {desc}: {d['count']}× = *{fmt(d['total'])} ₴*")
-    return lines
-
-def build_weekly_report() -> str:
-    recs = get_week_records()
-    if not recs: return "📭 За прошлую неделю трат нет."
-    s = analyze_records(recs)
-    lines = ["📅 *Отчёт за неделю*\n",
-             f"💰 Потрачено: *{fmt(s['total'])} ₴* ({s['count']} записей)\n",
-             "*По категориям:*"] + _cat_lines(s)
-    if s["by_day"]:
-        td = max(s["by_day"], key=s["by_day"].get)
-        lines.append(f"\n📈 Самый дорогой день: *{td}* — {fmt(s['by_day'][td])} ₴")
-    lines += _leak_lines(s)
-    return "\n".join(lines)
-
-def build_monthly_report() -> str:
-    recs = get_current_month_records()
-    if not recs: return "📭 В этом месяце трат нет."
-    s = analyze_records(recs)
-    now = datetime.now()
-    avg = s["total"] / now.day if now.day else 0
-    lines = [f"📆 *Отчёт за {month_name(now.month)} {now.year}*\n",
-             f"💰 Потрачено: *{fmt(s['total'])} ₴* за {now.day} дней",
-             f"📊 В среднем: *{fmt(avg)} ₴/день*",
-             f"📈 Прогноз: *~{fmt(avg*30)} ₴*\n",
-             "*Топ категории:*"] + _cat_lines(s, 5) + _leak_lines(s)
-    return "\n".join(lines)
-
-def build_comparison() -> str:
-    all_recs = get_all_records()
-    now = datetime.now()
-    months = {}
-    for r in all_recs:
-        try:
-            d = datetime.strptime(r.get("Дата","")[:10], "%d.%m.%Y")
-            months.setdefault((d.year,d.month),[]).append(r)
-        except: pass
-    if len(months) < 2: return "📭 Нужно минимум 2 месяца данных."
-    lines = ["📊 *Сравнение месяцев*\n"]
-    prev_total = None
-    for ym in sorted(months, reverse=True)[:3]:
-        s = analyze_records(months[ym])
-        name = f"{month_name(ym[1])} {ym[0]}"
-        if prev_total:
-            diff = int((s["total"]-prev_total)/prev_total*100)
-            arrow = "📈" if diff>0 else "📉"
-            lines.append(f"*{name}*: {fmt(s['total'])} ₴ {arrow} {'+' if diff>0 else ''}{diff}%")
-        else:
-            lines.append(f"*{name}*: {fmt(s['total'])} ₴")
-        if s["by_category"]:
-            tc = max(s["by_category"], key=s["by_category"].get)
-            lines.append(f"  └ Топ: {get_category_emoji(tc)} {tc} — {fmt(s['by_category'][tc])} ₴")
-        prev_total = s["total"]
-    return "\n".join(lines)
-
-async def build_past_self_ai(chat_id) -> str:
-    """ИИ анализирует динамику трат vs прошлые месяцы"""
-    all_recs = get_all_records()
-    now = datetime.now()
-
-    def ms(ago):
-        t = now.replace(day=1)
-        for _ in range(ago): t = (t - timedelta(days=1)).replace(day=1)
-        return analyze_records(records_for_month(t.month, t.year, all_recs)), t
-
-    cur = analyze_records(get_current_month_records())
-    if not cur: return "📭 Недостаточно данных — запиши хотя бы несколько трат."
-
-    # Собираем данные для ИИ
-    data_lines = [f"Текущий месяц ({month_name(now.month)}): {fmt(cur['total'])} ₴"]
-    cats_cur = ", ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(cur["by_category"].items(), key=lambda x:-x[1])[:5])
-    data_lines.append(f"Категории: {cats_cur}")
-
-    history_parts = []
-    for ago, label in [(1,"1 месяц назад"),(2,"2 месяца назад"),(3,"3 месяца назад")]:
-        s, t = ms(ago)
-        if not s: continue
-        diff = int((cur["total"] - s["total"]) / s["total"] * 100) if s["total"] else 0
-        history_parts.append(f"{month_name(t.month)}: {fmt(s['total'])} ₴ ({'+' if diff>0 else ''}{diff}% vs сейчас)")
-        cats_h = ", ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1])[:3])
-        history_parts.append(f"  категории: {cats_h}")
-
-    if not history_parts:
-        return "📭 Нужно минимум 2 месяца данных для сравнения."
-
-    data_lines.append("\nИстория:")
-    data_lines.extend(history_parts)
-
-    prompt = f"""Ты финансовый аналитик. Проанализируй динамику трат пользователя и дай персональный инсайт.
-
-ДАННЫЕ:
-{chr(10).join(data_lines)}
-
-Напиши анализ в формате:
-- Заголовок 🪞 *Сравнение с прошлым «я»*
-- 2-3 конкретных наблюдения с цифрами (тратит больше/меньше, в каких категориях изменения)
-- 1 короткий вывод или совет
-- Тон: дружелюбный, без воды, с эмодзи
-- Длина: 5-8 строк максимум"""
-
-    messages = [{"role":"system","content":"Отвечай только на русском. Используй Markdown (жирный через *). Без лишних слов."},
-                {"role":"user","content":prompt}]
-    try:
-        return groq_chat(messages, max_tokens=400)
-    except:
-        return build_past_self_fallback(cur, ms)
-
-def build_past_self_fallback(cur, ms_fn) -> str:
-    """Запасной вариант без ИИ"""
-    now = datetime.now()
-    lines = ["🪞 *Сравнение с прошлым «я»*\n"]
-    for ago, label in [(1,"1 мес"),(2,"2 мес"),(3,"3 мес")]:
-        s, t = ms_fn(ago)
-        if not s: continue
-        diff = int((cur["total"]-s["total"])/s["total"]*100)
-        sign = "+" if diff>0 else ""
-        lines.append(f"{'📈' if diff>0 else '📉'} *{label} назад* ({month_name(t.month)}): {sign}{diff}%")
-    return "\n".join(lines)
-
-async def build_habits_ai() -> str:
-    """ИИ анализирует привычки и считает их стоимость"""
-    all_recs = get_all_records()
-    months: dict = {}
-    for r in all_recs:
-        try:
-            d = datetime.strptime(r.get("Дата","")[:10], "%d.%m.%Y")
-            months.setdefault((d.year,d.month),[]).append(r)
-        except: pass
-    if not months: return "📭 Недостаточно данных."
-
-    n = max(len(months), 1)
-    desc_data: dict = defaultdict(lambda: {"total":0.0,"count":0,"months":set()})
-    for ym, recs in months.items():
-        sk = get_sum_key(recs)
-        for r in recs:
-            desc = r.get("Описание","").lower().strip()
-            amt = float(r[sk]) if r.get(sk) else 0
-            if desc and amt:
-                desc_data[desc]["total"] += amt
-                desc_data[desc]["count"] += 1
-                desc_data[desc]["months"].add(ym)
-
-    habits = {k:v for k,v in desc_data.items() if len(v["months"])>=2 and v["total"]/n>=200}
-    if not habits: return "📭 Пока мало данных. Записывай траты несколько недель — и я найду паттерны!"
-
-    # Данные для ИИ
-    habits_text = []
-    for desc, d in sorted(habits.items(), key=lambda x:-x[1]["total"])[:8]:
-        monthly = d["total"] / n
-        annual = monthly * 12
-        habits_text.append(f"- {desc}: {fmt(monthly)}₴/мес, {fmt(annual)}₴/год ({d['count']} раз)")
-
-    prompt = f"""Ты финансовый аналитик. Проанализируй регулярные траты пользователя.
-
-ПРИВЫЧКИ (повторяются 2+ месяца):
-{chr(10).join(habits_text)}
-
-Напиши анализ:
-- Заголовок 💸 *Стоимость привычек*
-- Для каждой привычки: сумма в месяц и год, и с чем можно сравнить (например "это = 3 поездки в кино")
-- Выдели 1-2 привычки где можно сэкономить (если такие есть)
-- Тон: без осуждения, с юмором где уместно, с эмодзи
-- Длина: компактно, без воды"""
-
-    messages = [{"role":"system","content":"Отвечай только на русском. Markdown через *. Кратко и по делу."},
-                {"role":"user","content":prompt}]
-    try:
-        return groq_chat(messages, max_tokens=500)
-    except:
-        # Fallback
-        lines = ["💸 *Стоимость привычек*\n"]
-        for desc, d in sorted(habits.items(), key=lambda x:-x[1]["total"])[:6]:
-            monthly = d["total"]/n
-            annual = monthly*12
-            equiv = next((label for thr,label in EQUIVALENTS if annual>=thr*0.7), None)
-            lines += [f"*{desc.capitalize()}*", f"  📅 {fmt(monthly)} ₴/мес · 📆 {fmt(annual)} ₴/год"]
-            if equiv: lines.append(f"  💡 = {equiv}")
-            lines.append("")
-        return "\n".join(lines)
-
-async def build_advice_ai(chat_id) -> str:
-    """ИИ даёт персональные советы на основе реальных данных"""
-    recs = get_current_month_records()
-    if not recs or len(recs) < 3:
-        return "📭 Маловато данных для советов — запиши хотя бы 5-10 трат."
-
-    s = analyze_records(recs)
-    now = datetime.now()
-    avg = s["total"] / now.day if now.day else 0
-    bs = get_budget_status(chat_id)
-    sal = get_salary_info(chat_id)
-
-    # Контекст
-    cats = ", ".join(f"{c}: {fmt(a)}₴ ({int(a/s['total']*100)}%)" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1]))
-    budget_info = f"Бюджет: {fmt(bs['budget'])}₴, использовано {bs['percent']}%, осталось {fmt(bs['left'])}₴" if bs else "бюджет не установлен"
-    salary_info = f"Зарплата: {sal.get('amount','?')}₴, {sal['day']}-е число" if sal else "зарплата не указана"
-    leaks = ", ".join(f"{k} ({v['count']}×={fmt(v['total'])}₴)" for k,v in list(s.get("leaks",{}).items())[:3])
-
-    prompt = f"""Ты личный финансовый советник. Дай конкретные советы на основе данных пользователя.
-
-ДАННЫЕ за {month_name(now.month)}:
-- Потрачено: {fmt(s['total'])}₴ за {now.day} дней, среднее {fmt(avg)}₴/день
-- Прогноз на месяц: {fmt(avg*30)}₴
-- Категории: {cats}
-- {budget_info}
-- {salary_info}
-- Частые траты: {leaks or 'нет'}
-- Активные цели: {", ".join(f"{g['name']}: {fmt(g['saved'])}/{fmt(g['target'])}₴" for g in goals.values()) or 'нет'}
-
-Напиши 3-4 конкретных совета:
-- Заголовок 💡 *Персональные советы*
-- Каждый совет с конкретной цифрой ("если сократить X на 20% — сэкономишь Y₴")
-- Если есть цели — упомяни как туда быстрее накопить
-- Тон: дружелюбный, практичный, без банальщины
-- Длина: 6-10 строк"""
-
-    messages = [{"role":"system","content":"Отвечай только на русском. Markdown через *. Конкретные цифры важны."},
-                {"role":"user","content":prompt}]
-    try:
-        return groq_chat(messages, max_tokens=500)
-    except:
-        return build_advice_fallback(recs)
-
-def build_advice_fallback(records: list) -> str:
-    if not records: return ""
-    s = analyze_records(records)
-    if not s: return ""
-    total = s["total"]
-    bc = s["by_category"]
-    tips = []
-    food = bc.get("Еда / продукты",0)
-    if food > total*0.35:
-        tips.append(f"🍔 На еду {int(food/total*100)}%. −25% = *+{fmt(food*0.25)} ₴/мес*")
-    nic = bc.get("Никотин",0)
-    if nic > 500:
-        tips.append(f"🚬 Никотин: *{fmt(nic)} ₴/мес* = *{fmt(nic*12)} ₴/год*")
-    if not tips: return "💡 Трать осознанно!"
-    return "💡 *Советы:*\n" + "\n".join(f"{i}. {t}" for i,t in enumerate(tips,1))
-
-def build_insight() -> str:
-    """Базовый инсайт для еженедельного уведомления (синхронный)"""
-    recs = get_week_records()
-    month_recs = get_current_month_records()
-    if not recs: return "📭 За эту неделю данных нет."
-    s = analyze_records(recs)
-    lines = ["🧠 *Инсайт недели*\n"]
-    if s["by_day"]:
-        td = max(s["by_day"], key=s["by_day"].get)
-        avg = s["total"]/7
-        if s["by_day"][td] > avg*1.5:
-            lines.append(f"📅 Дорогой день: *{td}* (+{int(s['by_day'][td]/avg*100-100)}% от среднего)")
-    if s["by_category"]:
-        tc = max(s["by_category"], key=s["by_category"].get)
-        pct = int(s["by_category"][tc]/s["total"]*100)
-        lines.append(f"{get_category_emoji(tc)} Топ: *{tc}* — {pct}%")
-    if month_recs:
-        ms = analyze_records(month_recs)
-        avg_day = ms["total"]/datetime.now().day
-        lines.append(f"📈 Прогноз месяца: *~{fmt(avg_day*30)} ₴*")
-    return "\n".join(lines)
-
-# ── УМНЫЕ УВЕДОМЛЕНИЯ (НОВОЕ) ─────────────────────────────────────────────────
-async def send_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
-    """Утреннее сводка: сколько можно потратить сегодня"""
-    cid = (context.job.data or {}).get("chat_id") or CHAT_ID
-    if not cid: return
-    
-    bs = get_budget_status(cid)
-    sal = get_salary_info(cid)
-    now = datetime.now()
-    lines = [f"☀️ *Доброе утро! {now.strftime('%d.%m.%Y')}*\n"]
-    
-    today_spent = sum_records(get_today_records())
-    if today_spent > 0:
-        lines.append(f"📌 Вчера потрачено: *{fmt(today_spent)} ₴*")
-    
-    if bs:
-        days_in_month = 30
-        days_left = days_in_month - now.day + 1
-        daily_limit = bs["left"] / max(days_left, 1)
-        lines.append(f"💰 Бюджет использован на *{bs['percent']}%*")
-        lines.append(f"📊 Лимит на сегодня: *{fmt(daily_limit)} ₴*")
-    elif sal and sal.get("amount"):
-        spent = sum_records(get_current_month_records())
-        left = float(sal["amount"]) - spent
-        sal_day = sal["day"]
-        if now.day <= sal_day:
-            days_left = sal_day - now.day + 1
-        else:
-            next_m = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
-            days_left = (next_m.replace(day=sal_day) - now).days + 1
-        daily = left / max(days_left, 1)
-        lines.append(f"💵 До зарплаты: *{fmt(daily)} ₴/день*")
-    
-    if len(lines) > 1:
-        await context.bot.send_message(chat_id=cid, text="\n".join(lines), parse_mode="Markdown")
-
-async def send_weekly_insight(context: ContextTypes.DEFAULT_TYPE):
-    cid = (context.job.data or {}).get("chat_id") or CHAT_ID
-    if cid: await context.bot.send_message(chat_id=cid, text=build_insight(), parse_mode="Markdown")
-
-async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
-    data = context.job.data or {}
-    did = data.get("debt_id")
-    cid = data.get("chat_id") or CHAT_ID
-    if not did or did not in debts or not cid: return
-    d = debts[did]
-    ams = d.get("amounts",[])
-    kb = inline_kb([
-        [("✅ Вернули","paid_"+did),("⏰ Напомнить ещё","remind_"+did)],
-    ])
-    await context.bot.send_message(
-        chat_id=cid,
-        text=f"⏰ *Напоминание о долге*\n\n👤 *{d['name']}* должен {format_amounts(ams)}",
-        parse_mode="Markdown", reply_markup=kb)
-
 # ── КЛАВИАТУРА ───────────────────────────────────────────────────────────────
 MAIN_KB = ReplyKeyboardMarkup([
     [KeyboardButton("💰 Финансы"), KeyboardButton("📊 Аналитика")],
@@ -1227,17 +696,28 @@ async def cmd_budget_inline(chat_id, context):
 
 # ── HANDLERS ─────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Перезагружаем все данные (не сбрасываем!)
+    _records_cache.clear()
+    _settings.clear()
+    load_settings()
+    load_user_categories()
+    # Перезагружаем долги — только активные, не трогаем уже закрытые
+    debts.clear()
+    debt_counter[0] = 0
     load_debts()
+    goals.clear()
+    goal_counter[0] = 0
     load_goals()
     await update.message.reply_text(
         "👋 Привет! Я твой финансовый *AI-агент*.\n\n"
-        "🎙 *Запись трат:* «Снюс 800» или «Мойка 350, бензин 1200»\n"
-        "💸 *Долг:* «Дал в долг Саше 500 долларов»\n"
-        "💰 *Бюджет:* «Бюджет 20000»\n"
-        "💵 *Зарплата:* «Зарплата 25 числа 35000»\n"
-        "🎯 *Цель:* «Цель iPhone 25000»\n"
-        "🤖 *Спросить:* нажми кнопку или задай вопрос свободно\n\n"
-        "_Powered by Groq LLaMA 3.3 70B_ 🧠",
+        "Просто пиши как обычно:\n"
+        "🛒 «Снюс 800» — запишу трату\n"
+        "💸 «Дал папе 500» — запишу долг\n"
+        "💰 «Бюджет 25000» — установлю бюджет\n"
+        "💵 «Зарплата 6го 30000» — запомню\n"
+        "🎯 «Накопить на iPhone 25000» — создам цель\n"
+        "❓ «Сколько потратил на еду?» — отвечу\n\n"
+        "_Понимаю русский, украинский и несколько команд сразу_ 🧠",
         parse_mode="Markdown", reply_markup=MAIN_KB)
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1327,105 +807,100 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process(update, context, text)
 
 # ── ИИ-РОУТЕР — сердце бота ──────────────────────────────────────────────────
-ROUTER_SYSTEM = """Ты — мозг финансового Telegram-бота. Твоя задача: понять намерение пользователя и вернуть JSON с командой.
+ROUTER_SYSTEM = """Ты — мозг финансового Telegram-бота. Пойми ВСЕ намерения пользователя и верни JSON.
 
-ДОСТУПНЫЕ КОМАНДЫ:
-- "expense"        — записать трату(ы). Поля: expenses: [{{amount, category, description, emoji}}]
-- "debt_new"       — записать новый долг. Поля: name, amounts:[{{amount,currency}}], note, remind_hours (опц.)
-- "debt_add"       — добавить к существующему долгу. Поля: name, amount, currency
-- "debt_return"    — отметить возврат долга. Поля: name, amount (null если всё), currency
-- "debt_remind"    — установить напоминание о долге. Поля: name, hours (1, 2, 6, 12, 24, 48, 168)
-- "budget_set"     — установить бюджет. Поля: amount
-- "salary_set"     — установить зарплату. Поля: day, amount (опц.)
-- "goal_new"       — создать финансовую цель. Поля: name, amount, emoji
-- "goal_deposit"   — пополнить цель. Поля: amount, goal_name (опц.)
-- "convert"        — конвертировать валюту. Поля: amount, from_currency, to_currency
-- "category_add"   — добавить новую категорию трат. Поля: name
-- "expense_edit"   — изменить категорию последней записи. Поля: old_category, new_category, description (опц.)
-- "question"       — вопрос, аналитика, совет. Поля: text
-- "unknown"        — непонятно что делать
+ВАЖНО: В одном сообщении может быть НЕСКОЛЬКО команд! Верни их все в массиве "actions".
 
-КАТЕГОРИИ ТРАТ: "Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Никотин", "Другое"
-+ пользовательские категории: {user_cats}
+ДОСТУПНЫЕ КОМАНДЫ (каждая — отдельный объект в массиве):
+- {{"action":"expense","expenses":[{{"amount":N,"category":"...","description":"...","emoji":"..."}}]}}
+- {{"action":"debt_new","name":"...","amounts":[{{"amount":N,"currency":"UAH|USD|EUR"}}],"note":"..."}}
+- {{"action":"debt_add","name":"...","amount":N,"currency":"UAH"}}
+- {{"action":"debt_return","name":"...","amount":N_или_null,"currency":"UAH"}}
+- {{"action":"debt_remind","name":"...","minutes":N}}  ← МИНУТЫ (30мин=30, 1час=60, 2часа=120, 1день=1440)
+- {{"action":"budget_set","amount":N}}
+- {{"action":"salary_set","day":N,"amount":N_или_null}}
+- {{"action":"goal_new","name":"...","amount":N,"emoji":"..."}}
+- {{"action":"goal_deposit","amount":N,"goal_name":"..."}}
+- {{"action":"convert","amount":N,"from_currency":"USD","to_currency":"UAH"}}
+- {{"action":"category_add","name":"...","emoji":"..."}}
+- {{"action":"expense_edit","old_category":"...","new_category":"...","amount":N_или_null,"description":"..."}}
+- {{"action":"expense_delete","description":"...","amount":N_или_null,"category":"..."}}
+- {{"action":"question","text":"..."}}
+- {{"action":"unknown"}}
 
-КОНТЕКСТ: {context}
-АКТИВНЫЕ ДОЛГИ: {debts}
-АКТИВНЫЕ ЦЕЛИ: {goals}
+КАТЕГОРИИ: "Еда / продукты","Транспорт","Развлечения","Здоровье / аптека","Никотин","Другое"
+Пользовательские: {user_cats}
+
+КОНТЕКСТ РАЗГОВОРА: {context}
+ДОЛГИ: {debts}
+ЦЕЛИ: {goals}
 
 ПРАВИЛА:
-- "снюс 800" → expense
-- "дал папе 200" → debt_new
-- "ещё 500" после долга → debt_add с именем из контекста
-- "напомни о долге папы через 2 часа" → debt_remind, hours=2
-- "напомни через час" → debt_remind, hours=1
-- "добавь категорию Учёба" → category_add
-- "убери из Другое 3000, это учёба" → expense_edit, old_category="Другое", new_category="Учёба"
-- "переведи запись в другую категорию" → expense_edit
-- числа "3к","1.5к" = тысячи (3000, 1500)
-- украинский и русский язык — одинаково
-- если не уверен между expense и question — выбирай expense если есть сумма
+- Одно сообщение = массив actions (даже если одна команда)
+- "3к"/"1.5к" = тысячи
+- Украинский и русский = одинаково  
+- Минуты для напоминания: "через 30 минут"=30, "через час"=60, "через 2 часа"=120, "через день"=1440
+- "удали/убери трату" → expense_delete
+- "добавь категорию X" → category_add с emoji подходящим к названию
 
-ВЕРНИ ТОЛЬКО JSON без текста:
-{{"action": "<команда>", ...поля}}"""
+ФОРМАТ ОТВЕТА — ТОЛЬКО JSON:
+{{"actions": [...]}}"""
 
-async def route_message(text: str, chat_id, conv_ctx: dict) -> dict:
-    """ИИ определяет что делать с сообщением"""
+async def route_message(text: str, chat_id, conv_ctx: dict) -> list:
+    """ИИ определяет ВСЕ действия из сообщения, возвращает список"""
     debts_info = ", ".join(f"{d['name']}: {format_amounts(d['amounts']).replace('*','')}" for d in list(debts.values())[:5]) or "нет"
     goals_info = ", ".join(f"{g['name']}: {fmt(g['saved'])}/{fmt(g['target'])}₴" for g in list(goals.values())[:3]) or "нет"
-    ctx_info = f"последнее имя: {conv_ctx.get('last_name','нет')}, последнее действие: {conv_ctx.get('last_action','нет')}"
+    last_msgs = conv_ctx.get("last_messages", [])
+    ctx_info = f"имя: {conv_ctx.get('last_name','нет')}, действие: {conv_ctx.get('last_action','нет')}, последние сообщения: {'; '.join(last_msgs[-3:]) if last_msgs else 'нет'}"
     user_cats_info = ", ".join(_user_categories) if _user_categories else "нет"
 
     system = ROUTER_SYSTEM.format(context=ctx_info, debts=debts_info, goals=goals_info, user_cats=user_cats_info)
     messages = [
         {"role": "system", "content": system},
+        # Мульти-команда
+        {"role": "user", "content": "бюджет 25к и зарплата 6го 30000"},
+        {"role": "assistant", "content": '{"actions":[{"action":"budget_set","amount":25000},{"action":"salary_set","day":6,"amount":30000}]}'},
+        # Два долга
+        {"role": "user", "content": "дал Саше 500 и Пете 300"},
+        {"role": "assistant", "content": '{"actions":[{"action":"debt_new","name":"Саша","amounts":[{"amount":500,"currency":"UAH"}],"note":""},{"action":"debt_new","name":"Петя","amounts":[{"amount":300,"currency":"UAH"}],"note":""}]}'},
+        # Частичный возврат мульти-валюта
+        {"role": "user", "content": "папа вернул 200 гривен и 50 долларов"},
+        {"role": "assistant", "content": '{"actions":[{"action":"debt_return","name":"Папа","amount":200,"currency":"UAH"},{"action":"debt_return","name":"Папа","amount":50,"currency":"USD"}]}'},
+        # Трата
         {"role": "user", "content": "снюс 800"},
-        {"role": "assistant", "content": '{"action":"expense","expenses":[{"amount":800,"category":"Никотин","description":"снюс","emoji":"🚬"}]}'},
-        {"role": "user", "content": "заправился на 1200 и мойка 350"},
-        {"role": "assistant", "content": '{"action":"expense","expenses":[{"amount":1200,"category":"Транспорт","description":"заправка","emoji":"⛽"},{"amount":350,"category":"Транспорт","description":"мойка","emoji":"🚿"}]}'},
-        {"role": "user", "content": "дал папе 500"},
-        {"role": "assistant", "content": '{"action":"debt_new","name":"Папа","amounts":[{"amount":500,"currency":"UAH"}],"note":""}'},
-        {"role": "user", "content": "напомни о долге папы через 2 часа"},
-        {"role": "assistant", "content": '{"action":"debt_remind","name":"Папа","hours":2}'},
-        {"role": "user", "content": "напомни через час"},
-        {"role": "assistant", "content": '{"action":"debt_remind","name":"","hours":1}'},
+        {"role": "assistant", "content": '{"actions":[{"action":"expense","expenses":[{"amount":800,"category":"Никотин","description":"снюс","emoji":"🚬"}]}]}'},
+        # Напоминание в минутах
+        {"role": "user", "content": "напомни о долге папы через 30 минут"},
+        {"role": "assistant", "content": '{"actions":[{"action":"debt_remind","name":"Папа","minutes":30}]}'},
+        # Удалить трату
+        {"role": "user", "content": "удали трату снюс 800"},
+        {"role": "assistant", "content": '{"actions":[{"action":"expense_delete","description":"снюс","amount":800,"category":"Никотин"}]}'},
+        # Категория с эмодзи
         {"role": "user", "content": "добавь категорию Учёба"},
-        {"role": "assistant", "content": '{"action":"category_add","name":"Учёба"}'},
-        {"role": "user", "content": "убери из Другое 3000, это были траты на учёбу"},
-        {"role": "assistant", "content": '{"action":"expense_edit","old_category":"Другое","new_category":"Учёба","amount":3000}'},
-        {"role": "user", "content": "бюджет на месяц 25к"},
-        {"role": "assistant", "content": '{"action":"budget_set","amount":25000}'},
-        {"role": "user", "content": "получу зарплату 6го 25000"},
-        {"role": "assistant", "content": '{"action":"salary_set","day":6,"amount":25000}'},
-        {"role": "user", "content": "хочу накопить на отпуск 60к"},
-        {"role": "assistant", "content": '{"action":"goal_new","name":"Отпуск","amount":60000,"emoji":"✈️"}'},
-        {"role": "user", "content": "100 баксів в гривні"},
-        {"role": "assistant", "content": '{"action":"convert","amount":100,"from_currency":"USD","to_currency":"UAH"}'},
+        {"role": "assistant", "content": '{"actions":[{"action":"category_add","name":"Учёба","emoji":"📚"}]}'},
+        # Вопрос
         {"role": "user", "content": "сколько потратил на еду?"},
-        {"role": "assistant", "content": '{"action":"question","text":"сколько потратил на еду?"}'},
+        {"role": "assistant", "content": '{"actions":[{"action":"question","text":"сколько потратил на еду?"}]}'},
         {"role": "user", "content": text},
     ]
     try:
-        raw = _llm(messages, max_tokens=350, temperature=0.0)
+        raw = _llm(messages, max_tokens=500, temperature=0.0)
         raw = _extract_json(raw, "{")
-        return json.loads(raw)
+        result = json.loads(raw)
+        actions = result.get("actions", [result])  # поддержка старого формата
+        return actions if isinstance(actions, list) else [actions]
     except Exception as e:
         logger.error(f"route_message error: {e} | raw: {raw if 'raw' in dir() else '?'}")
-        return {"action": "unknown"}
+        return [{"action": "unknown"}]
 
-async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    chat_id = update.effective_chat.id
-    conv_ctx = get_ctx(chat_id)
-
-    await update.message.reply_chat_action("typing")
-    route = await route_message(text, chat_id, conv_ctx)
+async def execute_action(route: dict, update, context, chat_id: int, text: str, conv_ctx: dict) -> str | None:
+    """Выполняет одно действие, возвращает текст ответа или None"""
     action = route.get("action", "unknown")
-    logger.info(f"Router: '{text}' → {action}")
 
     # ── ТРАТА ──
     if action == "expense":
         expenses = route.get("expenses", [])
-        if not expenses:
-            await update.message.reply_text("🤔 Не понял сумму. Напиши например: «Кофе 85» или «Бензин 1200»"); return
+        if not expenses: return "🤔 Не понял сумму. Например: «Кофе 85»"
         date = datetime.now().strftime("%d.%m.%Y %H:%M")
         month_recs = get_current_month_records()
         lines = ["✅ *Записано!*\n"]
@@ -1440,7 +915,6 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
         if len(expenses) > 1:
             total = sum(float(str(e.get("amount",0)).replace(",",".")) for e in expenses)
             lines.append(f"\n💰 *Итого: {fmt(total)} ₴*")
-        # Статус бюджета
         cat0 = fix_cat(expenses[0].get("category","Другое"))
         sk = get_sum_key(month_recs)
         cat_total = sum(float(r[sk]) for r in month_recs if fix_cat(r.get("Категория",""))==cat0 and r.get(sk))
@@ -1452,7 +926,33 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
             if pct >= 90: lines.append(f"\n🔴 *Бюджет на {pct}%!*")
             elif pct >= 70: lines.append(f"\n🟡 Бюджет на {pct}%")
         set_ctx(chat_id, last_action="expense")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return "\n".join(lines)
+
+    # ── УДАЛИТЬ ТРАТУ ──
+    elif action == "expense_delete":
+        desc_hint = route.get("description","").lower()
+        amount_hint = route.get("amount")
+        cat_hint = route.get("category","").lower()
+        try:
+            all_recs = get_all_records()
+            sh = get_sheet()
+            sk = get_sum_key(all_recs)
+            for i, r in enumerate(reversed(all_recs), 1):
+                row_idx = len(all_recs) - i + 2
+                r_desc = r.get("Описание","").lower()
+                r_amt = str(r.get(sk,""))
+                r_cat = r.get("Категория","").lower()
+                desc_ok = desc_hint in r_desc if desc_hint else True
+                amt_ok = str(int(float(amount_hint))) in r_amt if amount_hint else True
+                cat_ok = cat_hint in r_cat if cat_hint else True
+                if desc_ok and amt_ok and cat_ok:
+                    sh.delete_rows(row_idx)
+                    _invalidate("sheet1")
+                    return f"🗑 Запись *{r.get('Описание','?')}* — *{r.get(sk,'?')} ₴* удалена."
+            return "🤔 Не нашёл такую запись."
+        except Exception as e:
+            logger.error(f"expense_delete: {e}")
+            return "❌ Не удалось удалить запись."
 
     # ── НОВЫЙ ДОЛГ ──
     elif action == "debt_new":
@@ -1462,9 +962,7 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
             amt = route.get("amount")
             cur = route.get("currency","UAH")
             if amt: ams = [{"amount":float(amt),"currency":cur}]
-        if not name or not ams:
-            await update.message.reply_text("🤔 Не понял кому и сколько. Например: «Дал Саше 500»"); return
-        # Если долг уже есть — добавляем
+        if not name or not ams: return "🤔 Не понял кому и сколько."
         existing = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None)
         if existing:
             ex_ams = debts[existing].get("amounts",[])
@@ -1476,8 +974,7 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
             debts[existing]["amounts"] = ex_ams
             update_debt_amounts(existing, ex_ams)
             set_ctx(chat_id, last_name=name, last_action="debt_add")
-            await update.message.reply_text(
-                f"➕ *{name}* — долг обновлён\n💰 Итого: {format_amounts(ex_ams)}", parse_mode="Markdown"); return
+            return f"➕ *{name}* — долг обновлён\n💰 Итого: {format_amounts(ex_ams)}"
         note = route.get("note","")
         debt_counter[0] += 1
         did = str(debt_counter[0])
@@ -1488,10 +985,8 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
             data={"debt_id":did,"chat_id":chat_id}, name=f"debt_{did}")
         set_ctx(chat_id, last_name=name, last_action="debt_new")
         note_str = f"\n📝 {note}" if note else ""
-        await update.message.reply_text(
-            f"💸 *Долг записан!*\n\n👤 *{name}*\n💰 {format_amounts(ams)}{note_str}\n\n"
-            f"_Напиши «ещё 500» чтобы добавить к этому долгу_\n⏰ Напомню через {reminder_label(chat_id)}.",
-            parse_mode="Markdown")
+        return (f"💸 *Долг записан!*\n\n👤 *{name}*\n💰 {format_amounts(ams)}{note_str}\n\n"
+                f"_«ещё 500» — добавит к долгу_\n⏰ Напомню через {reminder_label(chat_id)}.")
 
     # ── ДОБАВИТЬ К ДОЛГУ ──
     elif action == "debt_add":
@@ -1499,8 +994,7 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
         amount = float(str(route.get("amount",0)).replace(",","."))
         currency = route.get("currency","UAH")
         did = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None)
-        if not did:
-            await update.message.reply_text(f"🤔 Не нашёл активного долга для *{name}*.", parse_mode="Markdown"); return
+        if not did: return f"🤔 Не нашёл долга для *{name}*."
         ex_ams = debts[did].get("amounts",[])
         found = next((a for a in ex_ams if a.get("currency","UAH")==currency), None)
         if found: found["amount"] = float(found["amount"]) + amount
@@ -1508,92 +1002,80 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
         debts[did]["amounts"] = ex_ams
         update_debt_amounts(did, ex_ams)
         set_ctx(chat_id, last_name=debts[did]["name"], last_action="debt_add")
-        await update.message.reply_text(
-            f"➕ Добавил *{fmt(amount)} ₴* к долгу *{debts[did]['name']}*\n💰 Итого: {format_amounts(ex_ams)}",
-            parse_mode="Markdown")
+        return f"➕ Добавил *{fmt(amount)} ₴* к *{debts[did]['name']}*\n💰 Итого: {format_amounts(ex_ams)}"
 
-    # ── ВОЗВРАТ ДОЛГА ──
+    # ── ВОЗВРАТ ДОЛГА (поддержка мульти-валюты в одном запросе) ──
     elif action == "debt_return":
         name = str(route.get("name", conv_ctx.get("last_name",""))).strip().capitalize()
         did = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None)
-        if not did:
-            await update.message.reply_text(f"🤔 Не нашёл долга для *{name}*.", parse_mode="Markdown"); return
+        if not did: return f"🤔 Не нашёл долга для *{name}*."
         d = debts[did]
         ret_amount = route.get("amount")
+        currency = route.get("currency","UAH")
+        ex_ams = list(d.get("amounts",[]))
+        lines = [f"💰 *{d['name']}* вернул:\n"]
         if ret_amount:
-            # Частичный возврат
-            currency = route.get("currency","UAH")
-            ex_ams = d.get("amounts",[])
-            lines = [f"💰 *{d['name']}* вернул:\n"]
             for ea in ex_ams:
                 if ea.get("currency","UAH") == currency:
                     new = float(ea["amount"]) - float(ret_amount)
+                    sym = CURRENCY_SYMBOLS.get(currency,"₴")
                     if new <= 0:
-                        lines.append(f"✅ закрыто")
                         ex_ams = [a for a in ex_ams if a.get("currency","UAH") != currency]
+                        lines.append(f"✅ {sym}: долг закрыт")
                     else:
                         ea["amount"] = new
-                        lines.append(f"💸 {fmt(ret_amount)} ₴ → остаток *{fmt(new)} ₴*")
+                        lines.append(f"💸 {sym}: вернул {fmt(ret_amount)} → остаток *{fmt(new)} {sym}*")
                     break
-            if not ex_ams:
-                debts.pop(did); mark_paid(did); lines.append("\n🎉 *Долг полностью закрыт!*")
-            else:
-                debts[did]["amounts"] = ex_ams; update_debt_amounts(did, ex_ams)
-                lines.append(f"\n📊 Остаток: {format_amounts(ex_ams)}")
         else:
-            # Полное закрытие
-            ams = d.get("amounts",[])
-            debts.pop(did); mark_paid(did)
-            lines = [f"✅ *{d['name']}* вернул {format_amounts(ams)}\n\n🎉 *Долг закрыт!*"]
+            ex_ams = []
+            lines.append("✅ Всё вернул!")
+        if not ex_ams:
+            debts.pop(did); mark_paid(did); lines.append("\n🎉 *Долг полностью закрыт!*")
+        else:
+            debts[did]["amounts"] = ex_ams; update_debt_amounts(did, ex_ams)
+            lines.append(f"\n📊 Остаток: {format_amounts(ex_ams)}")
         set_ctx(chat_id, last_name=d["name"], last_action="debt_return")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return "\n".join(lines)
 
     # ── БЮДЖЕТ ──
     elif action == "budget_set":
         budget = float(str(route.get("amount",0)).replace(",","."))
-        if budget <= 0:
-            await update.message.reply_text("🤔 Не понял сумму бюджета."); return
+        if budget <= 0: return "🤔 Не понял сумму бюджета."
         save_setting(f"budget_{chat_id}", str(budget))
         bs = get_budget_status(chat_id)
         bar = "█"*(bs["percent"]//10) + "░"*(10-bs["percent"]//10) if bs else "░░░░░░░░░░"
         pct = bs["percent"] if bs else 0
-        await update.message.reply_text(
-            f"💰 *Бюджет установлен: {fmt(budget)} ₴*\n[{bar}] {pct}% использовано", parse_mode="Markdown")
+        return f"💰 *Бюджет: {fmt(budget)} ₴*\n[{bar}] {pct}% использовано"
 
     # ── ЗАРПЛАТА ──
     elif action == "salary_set":
         day = int(route.get("day", 1))
         amount = route.get("amount")
-        if not 1 <= day <= 31:
-            await update.message.reply_text("🤔 Не понял день зарплаты."); return
+        if not 1 <= day <= 31: return "🤔 Не понял день зарплаты."
         set_salary_info(chat_id, day, float(amount) if amount else None)
         amt_str = f" — *{fmt(float(amount))} ₴*" if amount else ""
-        await update.message.reply_text(
-            f"💵 *Зарплата установлена!*\n📅 День: *{day}-е число*{amt_str}", parse_mode="Markdown")
+        return f"💵 *Зарплата: {day}-е число*{amt_str}"
 
     # ── НОВАЯ ЦЕЛЬ ──
     elif action == "goal_new":
         name = route.get("name","Цель")
         target = float(str(route.get("amount",0)).replace(",","."))
         emoji_g = route.get("emoji","🎯")
-        if target <= 0:
-            await update.message.reply_text("🤔 Не понял сумму цели."); return
+        if target <= 0: return "🤔 Не понял сумму цели."
         goal_counter[0] += 1
         gid = str(goal_counter[0])
         date_str = datetime.now().strftime("%d.%m.%Y")
         goals[gid] = {"name":name,"target":target,"saved":0.0,"date":date_str,"emoji":emoji_g}
         save_goal_to_sheet(gid, name, target, 0, date_str, emoji_g)
         bar = build_goal_bar(0, target)
-        await update.message.reply_text(
-            f"{emoji_g} *Цель создана!*\n\n*{name}*\n[{bar}] 0%\n0 / {fmt(target)} ₴\n\n"
-            f"_Говори «Отложил 500» — буду отслеживать!_", parse_mode="Markdown")
+        return (f"{emoji_g} *Цель: {name}*\n[{bar}] 0%\n0 / {fmt(target)} ₴\n\n"
+                f"_«Отложил 500» — буду отслеживать!_")
 
     # ── ПОПОЛНЕНИЕ ЦЕЛИ ──
     elif action == "goal_deposit":
         amount = float(str(route.get("amount",0)).replace(",","."))
         goal_name = route.get("goal_name","")
-        if not goals:
-            await update.message.reply_text("🎯 Целей нет. Создай: «Хочу накопить на отпуск 60000»"); return
+        if not goals: return "🎯 Целей нет. Создай: «Накопить на отпуск 60000»"
         if len(goals) == 1:
             gid = list(goals.keys())[0]
         elif goal_name:
@@ -1601,7 +1083,8 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
         else:
             kb = [[(f"{g['emoji']} {g['name']}", f"goal_add_{gid}_{amount}")] for gid, g in goals.items()]
             await update.message.reply_text(f"💰 *{fmt(amount)} ₴* — к какой цели?",
-                parse_mode="Markdown", reply_markup=inline_kb(kb)); return
+                parse_mode="Markdown", reply_markup=inline_kb(kb))
+            return None
         g = goals[gid]
         g["saved"] = min(g["saved"] + amount, g["target"])
         update_goal_saved(gid, g["saved"])
@@ -1611,7 +1094,7 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
         if g["saved"] >= g["target"]:
             msg += "\n\n🎉 *Цель достигнута!* Поздравляю!"
             goals.pop(gid); close_goal(gid)
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        return msg
 
     # ── КОНВЕРТАЦИЯ ──
     elif action == "convert":
@@ -1620,123 +1103,127 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
         to_cur = route.get("to_currency","UAH").upper()
         uah = await convert_to_uah(amount, from_cur)
         sym = CURRENCY_SYMBOLS.get(from_cur, from_cur)
-        await update.message.reply_text(
-            f"💱 *{fmt(amount)} {sym}* = *{fmt(uah)} ₴*\n_(по курсу НБУ)_", parse_mode="Markdown")
-
-    # ── ВОПРОС / СОВЕТ ──
-    elif action == "question":
-        response = await ai_chat_response(chat_id, text)
-        await update.message.reply_text(response, parse_mode="Markdown")
+        return f"💱 *{fmt(amount)} {sym}* = *{fmt(uah)} ₴*\n_(по курсу НБУ)_"
 
     # ── ДОБАВИТЬ КАТЕГОРИЮ ──
     elif action == "category_add":
         name = route.get("name","").strip().capitalize()
-        if not name:
-            await update.message.reply_text("🤔 Не понял название категории."); return
-        save_user_category(name)
-        await update.message.reply_text(
-            f"✅ Категория *{name}* добавлена!\n\nТеперь можешь писать: «Учёба 1500» — и запишу в неё.",
-            parse_mode="Markdown")
+        emoji_c = route.get("emoji","")
+        if not name: return "🤔 Не понял название категории."
+        save_user_category(name, emoji_c)
+        em = EMOJI_MAP.get(name, get_category_emoji(name))
+        return f"✅ Категория {em} *{name}* добавлена!\nТеперь пиши: «{name} 1500»"
 
-    # ── РЕДАКТИРОВАТЬ ЗАПИСЬ (изменить категорию) ──
+    # ── РЕДАКТИРОВАТЬ ЗАПИСЬ ──
     elif action == "expense_edit":
         old_cat = route.get("old_category","")
-        new_cat = route.get("new_category","").strip()
+        new_cat = route.get("new_category","").strip().capitalize()
         amount = route.get("amount")
-        desc_hint = route.get("description","")
-
-        # Добавляем новую категорию если её ещё нет
+        desc_hint = route.get("description","").lower()
         if new_cat and new_cat not in get_all_categories():
             save_user_category(new_cat)
-
-        # Ищем запись в таблице
         try:
             all_recs = get_all_records()
             sh = get_sheet()
             sk = get_sum_key(all_recs)
-            found = []
             for i, r in enumerate(reversed(all_recs), 1):
-                row_idx = len(all_recs) - i + 2  # +2 = заголовок
-                r_cat = r.get("Категория","")
-                r_amt = str(r.get(sk,""))
-                r_desc = r.get("Описание","").lower()
-                # Ищем по категории и опционально по сумме/описанию
-                cat_match = old_cat.lower() in r_cat.lower() if old_cat else True
-                amt_match = str(int(float(amount))) in r_amt if amount else True
-                desc_match = desc_hint.lower() in r_desc if desc_hint else True
-                if cat_match and amt_match and desc_match:
-                    found.append((row_idx, r))
-                    if len(found) >= 3: break
-
-            if not found:
-                await update.message.reply_text(f"🤔 Не нашёл запись в категории *{old_cat}*.", parse_mode="Markdown"); return
-
-            # Обновляем первую найденную
-            row_idx, rec = found[0]
-            # Находим колонку "Категория"
-            headers = sh.row_values(1)
-            cat_col = headers.index("Категория") + 1 if "Категория" in headers else 3
-            sh.update_cell(row_idx, cat_col, new_cat)
-            _invalidate("sheet1")
-
-            amt_str = f" {fmt(float(amount))} ₴" if amount else ""
-            await update.message.reply_text(
-                f"✏️ Запись{amt_str} обновлена:\n*{old_cat or '?'}* → *{new_cat}*",
-                parse_mode="Markdown")
+                row_idx = len(all_recs) - i + 2
+                cat_ok = old_cat.lower() in r.get("Категория","").lower() if old_cat else True
+                amt_ok = str(int(float(amount))) in str(r.get(sk,"")) if amount else True
+                desc_ok = desc_hint in r.get("Описание","").lower() if desc_hint else True
+                if cat_ok and amt_ok and desc_ok:
+                    headers = sh.row_values(1)
+                    cat_col = headers.index("Категория") + 1 if "Категория" in headers else 3
+                    sh.update_cell(row_idx, cat_col, new_cat)
+                    _invalidate("sheet1")
+                    amt_str = f" {fmt(float(amount))} ₴" if amount else ""
+                    return f"✏️ Запись{amt_str}: *{old_cat or '?'}* → {get_category_emoji(new_cat)} *{new_cat}*"
+            return f"🤔 Не нашёл запись в категории *{old_cat}*."
         except Exception as e:
             logger.error(f"expense_edit: {e}")
-            await update.message.reply_text("❌ Не удалось обновить запись.")
+            return "❌ Не удалось обновить запись."
 
     # ── НАПОМИНАНИЕ О ДОЛГЕ ──
     elif action == "debt_remind":
         name = str(route.get("name", conv_ctx.get("last_name",""))).strip().capitalize()
-        hours = float(route.get("hours", 24))
-        # Ищем долг
+        minutes = float(route.get("minutes", route.get("hours", 24) * 60))
         did = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None) if name else None
-        if not did and debts:
-            did = list(debts.keys())[-1]  # последний долг
-        if not did:
-            await update.message.reply_text("🤔 Нет активных долгов для напоминания."); return
+        if not did and debts: did = list(debts.keys())[-1]
+        if not did: return "🤔 Нет активных долгов."
         d = debts[did]
         for job in context.job_queue.get_jobs_by_name(f"debt_{did}"):
             job.schedule_removal()
-        context.job_queue.run_once(
-            send_debt_reminder,
-            when=timedelta(hours=hours),
-            data={"debt_id": did, "chat_id": chat_id},
-            name=f"debt_{did}"
-        )
-        # Красивый лейбл времени
-        if hours < 1: label = f"{int(hours*60)} минут"
-        elif hours == 1: label = "1 час"
-        elif hours < 24: label = f"{int(hours)} часов"
-        elif hours == 24: label = "1 день"
-        else: label = f"{int(hours/24)} дней"
+        context.job_queue.run_once(send_debt_reminder,
+            when=timedelta(minutes=minutes),
+            data={"debt_id":did,"chat_id":chat_id}, name=f"debt_{did}")
+        if minutes < 60: label = f"{int(minutes)} минут"
+        elif minutes == 60: label = "1 час"
+        elif minutes < 1440: label = f"{int(minutes//60)} часов"
+        elif minutes == 1440: label = "1 день"
+        else: label = f"{int(minutes//1440)} дней"
         set_ctx(chat_id, last_name=d["name"], last_action="debt_remind")
-        await update.message.reply_text(
-            f"⏰ Напомню о долге *{d['name']}* через *{label}*.",
-            parse_mode="Markdown")
-    else:
-        # Последняя попытка — может это трата?
+        return f"⏰ Напомню о долге *{d['name']}* через *{label}*."
+
+    # ── ВОПРОС ──
+    elif action == "question":
+        q = route.get("text", text)
+        return await ai_chat_response(chat_id, q)
+
+    return None
+
+
+async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    chat_id = update.effective_chat.id
+    conv_ctx = get_ctx(chat_id)
+
+    await update.message.reply_chat_action("typing")
+    actions = await route_message(text, chat_id, conv_ctx)
+    logger.info(f"Router: '{text[:50]}' → {[a.get('action') for a in actions]}")
+
+    # Обновляем контекст разговора
+    last_msgs = conv_ctx.get("last_messages", [])
+    last_msgs.append(text[:100])
+    set_ctx(chat_id, last_messages=last_msgs[-10:])
+
+    responses = []
+    for route in actions:
+        try:
+            result = await execute_action(route, update, context, chat_id, text, conv_ctx)
+            if result:
+                responses.append(result)
+        except Exception as e:
+            logger.error(f"execute_action {route.get('action')}: {e}")
+
+    if not responses:
+        # Последняя попытка — прямой парсинг трат
         expenses = parse_expenses(text)
         if expenses:
             date = datetime.now().strftime("%d.%m.%Y %H:%M")
             lines = ["✅ *Записано!*\n"]
             for exp in expenses:
                 amount = float(str(exp.get("amount",0)))
+                if amount <= 0: continue
                 cat = fix_cat(exp.get("category","Другое"))
                 desc = exp.get("description","—")
                 emoji = exp.get("emoji","")
                 save_expense(date, amount, cat, desc, text)
                 lines.append(f"{emoji} *{desc}* — *{fmt(amount)} ₴*\n   _{get_category_emoji(cat)} {cat}_")
-            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            responses.append("\n".join(lines))
         else:
-            await update.message.reply_text(
+            responses.append(
                 "🤔 Не понял. Попробуй:\n"
                 "• *Трата:* «Кофе 85» или «Бензин 1200»\n"
                 "• *Долг:* «Дал Саше 500»\n"
-                "• *Вопрос:* «Сколько потратил на еду?»",
-                parse_mode="Markdown")
+                "• *Вопрос:* «Сколько потратил на еду?»"
+            )
+
+    # Отправляем все ответы
+    combined = "\n\n".join(responses)
+    if len(combined) <= 4096:
+        await update.message.reply_text(combined, parse_mode="Markdown")
+    else:
+        for r in responses:
+            await update.message.reply_text(r, parse_mode="Markdown")
 
 # ── CALLBACK ─────────────────────────────────────────────────────────────────
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
