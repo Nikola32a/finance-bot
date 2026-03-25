@@ -598,14 +598,21 @@ def _llm(messages: list, max_tokens=600, temperature=0.0) -> str:
     return r.choices[0].message.content.strip()
 
 def _extract_json(raw: str, bracket="[") -> str:
-    """Вырезает первый валидный JSON из ответа модели."""
+    """Вырезает первый валидный JSON из ответа модели. Надёжно обрезает мусор после."""
     close = "]" if bracket == "[" else "}"
     raw = raw.replace("```json","").replace("```","").strip()
     s = raw.find(bracket)
-    e = raw.rfind(close)
-    if s != -1 and e != -1:
-        return raw[s:e+1]
-    return raw
+    if s == -1: return raw
+    # Считаем вложенность скобок чтобы найти точное закрытие
+    depth = 0
+    open_b = bracket
+    for i, ch in enumerate(raw[s:], start=s):
+        if ch == open_b: depth += 1
+        elif ch == close:
+            depth -= 1
+            if depth == 0:
+                return raw[s:i+1]
+    return raw[s:]
 
 def groq_chat(messages: list, max_tokens=800) -> str:
     return _llm(messages, max_tokens=max_tokens, temperature=0.7)
@@ -1257,73 +1264,82 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ROUTER_SYSTEM = """Ты — мозг финансового Telegram-бота. Твоя задача: понять намерение пользователя и вернуть JSON с командой.
 
 ДОСТУПНЫЕ КОМАНДЫ:
-- "expense"     — записать трату(ы). Поля: expenses: [{{amount, category, description, emoji}}]
-- "debt_new"    — записать новый долг. Поля: name, amounts:[{{amount,currency}}], note
-- "debt_add"    — добавить к существующему долгу. Поля: name, amount, currency
-- "debt_return" — отметить возврат долга. Поля: name, amount, currency
-- "budget_set"  — установить бюджет. Поля: amount
-- "salary_set"  — установить зарплату. Поля: day, amount (amount опционально)
-- "goal_new"    — создать финансовую цель. Поля: name, amount, emoji
-- "goal_deposit"— пополнить цель. Поля: amount, goal_name (опционально)
-- "convert"     — конвертировать валюту. Поля: amount, from_currency, to_currency
-- "question"    — вопрос или просьба о совете, анализе, помощи. Поля: text
-- "unknown"     — непонятно что делать
+- "expense"        — записать трату(ы). Поля: expenses: [{{amount, category, description, emoji}}]
+- "debt_new"       — записать новый долг. Поля: name, amounts:[{{amount,currency}}], note, remind_hours (опц.)
+- "debt_add"       — добавить к существующему долгу. Поля: name, amount, currency
+- "debt_return"    — отметить возврат долга. Поля: name, amount (null если всё), currency
+- "debt_remind"    — установить напоминание о долге. Поля: name, hours (1, 2, 6, 12, 24, 48, 168)
+- "budget_set"     — установить бюджет. Поля: amount
+- "salary_set"     — установить зарплату. Поля: day, amount (опц.)
+- "goal_new"       — создать финансовую цель. Поля: name, amount, emoji
+- "goal_deposit"   — пополнить цель. Поля: amount, goal_name (опц.)
+- "convert"        — конвертировать валюту. Поля: amount, from_currency, to_currency
+- "category_add"   — добавить новую категорию трат. Поля: name
+- "expense_edit"   — изменить категорию последней записи. Поля: old_category, new_category, description (опц.)
+- "question"       — вопрос, аналитика, совет. Поля: text
+- "unknown"        — непонятно что делать
 
 КАТЕГОРИИ ТРАТ: "Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Никотин", "Другое"
++ пользовательские категории: {user_cats}
 
-КОНТЕКСТ (предыдущий разговор): {context}
-
+КОНТЕКСТ: {context}
 АКТИВНЫЕ ДОЛГИ: {debts}
 АКТИВНЫЕ ЦЕЛИ: {goals}
 
 ПРАВИЛА:
-- Если пишет просто "снюс 800" — это expense, не вопрос
-- Если пишет "дал папе 200" — debt_new
-- Если пишет "ещё 500" после долга — debt_add с именем из контекста
-- Если пишет "папа вернул" — debt_return
-- Если спрашивает "сколько потратил", "как дела с бюджетом" — question
-- Числа типа "3к", "1.5к" — это тысячи (3000, 1500)
-- Понимай украинский и русский язык одинаково
+- "снюс 800" → expense
+- "дал папе 200" → debt_new
+- "ещё 500" после долга → debt_add с именем из контекста
+- "напомни о долге папы через 2 часа" → debt_remind, hours=2
+- "напомни через час" → debt_remind, hours=1
+- "добавь категорию Учёба" → category_add
+- "убери из Другое 3000, это учёба" → expense_edit, old_category="Другое", new_category="Учёба"
+- "переведи запись в другую категорию" → expense_edit
+- числа "3к","1.5к" = тысячи (3000, 1500)
+- украинский и русский язык — одинаково
+- если не уверен между expense и question — выбирай expense если есть сумма
 
-ВЕРНИ ТОЛЬКО JSON, никакого текста:
-{{"action": "<команда>", ...поля команды}}"""
+ВЕРНИ ТОЛЬКО JSON без текста:
+{{"action": "<команда>", ...поля}}"""
 
 async def route_message(text: str, chat_id, conv_ctx: dict) -> dict:
     """ИИ определяет что делать с сообщением"""
     debts_info = ", ".join(f"{d['name']}: {format_amounts(d['amounts']).replace('*','')}" for d in list(debts.values())[:5]) or "нет"
     goals_info = ", ".join(f"{g['name']}: {fmt(g['saved'])}/{fmt(g['target'])}₴" for g in list(goals.values())[:3]) or "нет"
     ctx_info = f"последнее имя: {conv_ctx.get('last_name','нет')}, последнее действие: {conv_ctx.get('last_action','нет')}"
+    user_cats_info = ", ".join(_user_categories) if _user_categories else "нет"
 
-    system = ROUTER_SYSTEM.format(context=ctx_info, debts=debts_info, goals=goals_info)
+    system = ROUTER_SYSTEM.format(context=ctx_info, debts=debts_info, goals=goals_info, user_cats=user_cats_info)
     messages = [
         {"role": "system", "content": system},
-        # Few-shot примеры
         {"role": "user", "content": "снюс 800"},
         {"role": "assistant", "content": '{"action":"expense","expenses":[{"amount":800,"category":"Никотин","description":"снюс","emoji":"🚬"}]}'},
         {"role": "user", "content": "заправился на 1200 и мойка 350"},
         {"role": "assistant", "content": '{"action":"expense","expenses":[{"amount":1200,"category":"Транспорт","description":"заправка","emoji":"⛽"},{"amount":350,"category":"Транспорт","description":"мойка","emoji":"🚿"}]}'},
         {"role": "user", "content": "дал папе 500"},
         {"role": "assistant", "content": '{"action":"debt_new","name":"Папа","amounts":[{"amount":500,"currency":"UAH"}],"note":""}'},
-        {"role": "user", "content": "ещё 300"},
-        {"role": "assistant", "content": '{"action":"debt_add","name":"Папа","amount":300,"currency":"UAH"}'},
-        {"role": "user", "content": "папа вернул всё"},
-        {"role": "assistant", "content": '{"action":"debt_return","name":"Папа","amount":null,"currency":"UAH"}'},
-        {"role": "user", "content": "бюджет на месяц 25000"},
+        {"role": "user", "content": "напомни о долге папы через 2 часа"},
+        {"role": "assistant", "content": '{"action":"debt_remind","name":"Папа","hours":2}'},
+        {"role": "user", "content": "напомни через час"},
+        {"role": "assistant", "content": '{"action":"debt_remind","name":"","hours":1}'},
+        {"role": "user", "content": "добавь категорию Учёба"},
+        {"role": "assistant", "content": '{"action":"category_add","name":"Учёба"}'},
+        {"role": "user", "content": "убери из Другое 3000, это были траты на учёбу"},
+        {"role": "assistant", "content": '{"action":"expense_edit","old_category":"Другое","new_category":"Учёба","amount":3000}'},
+        {"role": "user", "content": "бюджет на месяц 25к"},
         {"role": "assistant", "content": '{"action":"budget_set","amount":25000}'},
-        {"role": "user", "content": "получаю зарплату 15го, 42000 гривен"},
-        {"role": "assistant", "content": '{"action":"salary_set","day":15,"amount":42000}'},
-        {"role": "user", "content": "хочу накопить на отпуск 60000"},
+        {"role": "user", "content": "получу зарплату 6го 25000"},
+        {"role": "assistant", "content": '{"action":"salary_set","day":6,"amount":25000}'},
+        {"role": "user", "content": "хочу накопить на отпуск 60к"},
         {"role": "assistant", "content": '{"action":"goal_new","name":"Отпуск","amount":60000,"emoji":"✈️"}'},
-        {"role": "user", "content": "отложил 2000 на цель"},
-        {"role": "assistant", "content": '{"action":"goal_deposit","amount":2000,"goal_name":""}'},
-        {"role": "user", "content": "сколько я потратил на еду в этом месяце?"},
-        {"role": "assistant", "content": '{"action":"question","text":"сколько я потратил на еду в этом месяце?"}'},
-        {"role": "user", "content": "100 долларов в гривны"},
+        {"role": "user", "content": "100 баксів в гривні"},
         {"role": "assistant", "content": '{"action":"convert","amount":100,"from_currency":"USD","to_currency":"UAH"}'},
+        {"role": "user", "content": "сколько потратил на еду?"},
+        {"role": "assistant", "content": '{"action":"question","text":"сколько потратил на еду?"}'},
         {"role": "user", "content": text},
     ]
     try:
-        raw = _llm(messages, max_tokens=300, temperature=0.0)
+        raw = _llm(messages, max_tokens=350, temperature=0.0)
         raw = _extract_json(raw, "{")
         return json.loads(raw)
     except Exception as e:
@@ -1546,7 +1562,94 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
         response = await ai_chat_response(chat_id, text)
         await update.message.reply_text(response, parse_mode="Markdown")
 
-    # ── НЕИЗВЕСТНО ──
+    # ── ДОБАВИТЬ КАТЕГОРИЮ ──
+    elif action == "category_add":
+        name = route.get("name","").strip().capitalize()
+        if not name:
+            await update.message.reply_text("🤔 Не понял название категории."); return
+        save_user_category(name)
+        await update.message.reply_text(
+            f"✅ Категория *{name}* добавлена!\n\nТеперь можешь писать: «Учёба 1500» — и запишу в неё.",
+            parse_mode="Markdown")
+
+    # ── РЕДАКТИРОВАТЬ ЗАПИСЬ (изменить категорию) ──
+    elif action == "expense_edit":
+        old_cat = route.get("old_category","")
+        new_cat = route.get("new_category","").strip()
+        amount = route.get("amount")
+        desc_hint = route.get("description","")
+
+        # Добавляем новую категорию если её ещё нет
+        if new_cat and new_cat not in get_all_categories():
+            save_user_category(new_cat)
+
+        # Ищем запись в таблице
+        try:
+            all_recs = get_all_records()
+            sh = get_sheet()
+            sk = get_sum_key(all_recs)
+            found = []
+            for i, r in enumerate(reversed(all_recs), 1):
+                row_idx = len(all_recs) - i + 2  # +2 = заголовок
+                r_cat = r.get("Категория","")
+                r_amt = str(r.get(sk,""))
+                r_desc = r.get("Описание","").lower()
+                # Ищем по категории и опционально по сумме/описанию
+                cat_match = old_cat.lower() in r_cat.lower() if old_cat else True
+                amt_match = str(int(float(amount))) in r_amt if amount else True
+                desc_match = desc_hint.lower() in r_desc if desc_hint else True
+                if cat_match and amt_match and desc_match:
+                    found.append((row_idx, r))
+                    if len(found) >= 3: break
+
+            if not found:
+                await update.message.reply_text(f"🤔 Не нашёл запись в категории *{old_cat}*.", parse_mode="Markdown"); return
+
+            # Обновляем первую найденную
+            row_idx, rec = found[0]
+            # Находим колонку "Категория"
+            headers = sh.row_values(1)
+            cat_col = headers.index("Категория") + 1 if "Категория" in headers else 3
+            sh.update_cell(row_idx, cat_col, new_cat)
+            _invalidate("sheet1")
+
+            amt_str = f" {fmt(float(amount))} ₴" if amount else ""
+            await update.message.reply_text(
+                f"✏️ Запись{amt_str} обновлена:\n*{old_cat or '?'}* → *{new_cat}*",
+                parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"expense_edit: {e}")
+            await update.message.reply_text("❌ Не удалось обновить запись.")
+
+    # ── НАПОМИНАНИЕ О ДОЛГЕ ──
+    elif action == "debt_remind":
+        name = str(route.get("name", conv_ctx.get("last_name",""))).strip().capitalize()
+        hours = float(route.get("hours", 24))
+        # Ищем долг
+        did = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None) if name else None
+        if not did and debts:
+            did = list(debts.keys())[-1]  # последний долг
+        if not did:
+            await update.message.reply_text("🤔 Нет активных долгов для напоминания."); return
+        d = debts[did]
+        for job in context.job_queue.get_jobs_by_name(f"debt_{did}"):
+            job.schedule_removal()
+        context.job_queue.run_once(
+            send_debt_reminder,
+            when=timedelta(hours=hours),
+            data={"debt_id": did, "chat_id": chat_id},
+            name=f"debt_{did}"
+        )
+        # Красивый лейбл времени
+        if hours < 1: label = f"{int(hours*60)} минут"
+        elif hours == 1: label = "1 час"
+        elif hours < 24: label = f"{int(hours)} часов"
+        elif hours == 24: label = "1 день"
+        else: label = f"{int(hours/24)} дней"
+        set_ctx(chat_id, last_name=d["name"], last_action="debt_remind")
+        await update.message.reply_text(
+            f"⏰ Напомню о долге *{d['name']}* через *{label}*.",
+            parse_mode="Markdown")
     else:
         # Последняя попытка — может это трата?
         expenses = parse_expenses(text)
