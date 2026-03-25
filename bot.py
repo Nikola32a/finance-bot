@@ -472,8 +472,18 @@ async def build_rates_msg() -> str:
     ]
     return "\n".join(lines)
 
-# ── ДОЛГИ ────────────────────────────────────────────────────────────────────
-debts: dict = {}
+# ── КОНТЕКСТ РАЗГОВОРА ───────────────────────────────────────────────────────
+# Хранит последний контекст: имя человека, последнее действие
+_conv_context: dict = {}  # chat_id -> {"last_name": str, "last_action": str}
+
+def get_ctx(chat_id) -> dict:
+    return _conv_context.get(str(chat_id), {})
+
+def set_ctx(chat_id, **kwargs):
+    cid = str(chat_id)
+    if cid not in _conv_context:
+        _conv_context[cid] = {}
+    _conv_context[cid].update(kwargs)
 debt_counter = [0]
 
 def _debts_sheet():
@@ -686,20 +696,40 @@ def parse_expenses(text: str) -> list:
             except: pass
         return []
 
-def parse_debt(text: str) -> dict:
+def parse_debt(text: str, context_name: str = "") -> dict:
+    """
+    Парсит долг из текста. context_name — имя из предыдущего сообщения (если есть).
+    Если несколько сумм одному человеку — суммирует в один долг.
+    """
+    ctx = f'\nКонтекст: предыдущее сообщение было про "{context_name}", используй это имя если в тексте нет другого.' if context_name else ""
     messages = [
-        {"role":"system","content":"""Извлеки информацию о долге из текста.
+        {"role":"system","content":f"""Извлеки информацию о долге из текста.{ctx}
+
 Верни ТОЛЬКО JSON без markdown:
-{"name":"<только имя человека>","amounts":[{"amount":<число>,"currency":"<UAH|USD|EUR>"}],"note":"<за что или пусто>"}
-Валюта: гривна/грн/₴ = UAH, доллар/бакс/$ = USD, евро/€ = EUR. Без валюты = UAH."""},
+{{"name":"<имя человека>","amounts":[{{"amount":<число>,"currency":"<UAH|USD|EUR>"}}],"note":"<за что или пусто>"}}
+
+Правила:
+- name: только имя (Папа, Саша, Вася) — без слов "долг", "дал" и т.д.
+- Если несколько сумм одному человеку ("папа 200 и ещё 800") — СЛОЖИ их в одну: amount=1000
+- Валюта: гривна/грн/₴=UAH, доллар/бакс/$=USD, евро/€=EUR. Без валюты=UAH
+- amounts всегда массив
+
+Примеры:
+"дал папе 200" → {{"name":"Папа","amounts":[{{"amount":200,"currency":"UAH"}}],"note":""}}
+"папа 200 и ещё 800" → {{"name":"Папа","amounts":[{{"amount":1000,"currency":"UAH"}}],"note":""}}
+"одолжил Саше 50 баксов на еду" → {{"name":"Саша","amounts":[{{"amount":50,"currency":"USD"}}],"note":"на еду"}}"""},
         {"role":"user","content":text},
     ]
     try:
-        raw = _llm(messages, max_tokens=200, temperature=0.0)
+        raw = _llm(messages, max_tokens=250, temperature=0.0)
         raw = _extract_json(raw, "{")
-        return json.loads(raw)
+        result = json.loads(raw)
+        # Нормализация имени
+        if result.get("name"):
+            result["name"] = result["name"].strip().capitalize()
+        return result
     except Exception as e:
-        logger.error(f"parse_debt: {e}")
+        logger.error(f"parse_debt: {e} | text: {text}")
         return {}
 
 def parse_goal(text: str) -> dict | None:
@@ -1331,7 +1361,8 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
     # ── Возврат долга ──
     if any(kw in lower for kw in ["отдал","вернул","отдала","вернула","погасил","расплатился"]):
         try:
-            parsed = parse_debt(text)
+            ctx = get_ctx(chat_id)
+            parsed = parse_debt(text, ctx.get("last_name",""))
             ams = parsed.get("amounts",[])
             if not ams and parsed.get("amount"):
                 ams = [{"amount":float(parsed["amount"]),"currency":"UAH"}]
@@ -1359,17 +1390,66 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
                 else:
                     debts[did]["amounts"] = ex_ams; update_debt_amounts(did, ex_ams)
                     lines.append(f"\n📊 Остаток: {format_amounts(ex_ams)}")
+                set_ctx(chat_id, last_name=d["name"], last_action="debt_return")
                 await update.message.reply_text("\n".join(lines), parse_mode="Markdown"); return
         except Exception as e: logger.error(f"debt_return: {e}")
 
+    # ── Добавление к существующему долгу ("ещё 500", "плюс 300 папе") ──
+    add_kw = any(kw in lower for kw in ["ещё","еще","плюс","добав","доплат","и ещё","и еще"])
+    if add_kw:
+        ctx = get_ctx(chat_id)
+        last_name = ctx.get("last_name","")
+        nums = re.findall(r'\d+(?:[.,]\d+)?', text)
+        if nums and last_name:
+            # Ищем существующий долг по имени из контекста
+            did = next((k for k,d in debts.items() if last_name.lower() in d["name"].lower()), None)
+            if did:
+                amount = float(nums[0].replace(",","."))
+                ex_ams = debts[did].get("amounts",[])
+                for ea in ex_ams:
+                    if ea.get("currency","UAH") == "UAH":
+                        ea["amount"] = float(ea["amount"]) + amount
+                        break
+                else:
+                    ex_ams.append({"amount": amount, "currency": "UAH"})
+                debts[did]["amounts"] = ex_ams
+                update_debt_amounts(did, ex_ams)
+                set_ctx(chat_id, last_name=debts[did]["name"], last_action="debt_add")
+                await update.message.reply_text(
+                    f"➕ Добавил *{fmt(amount)} ₴* к долгу *{debts[did]['name']}*\n"
+                    f"💰 Итого: {format_amounts(ex_ams)}",
+                    parse_mode="Markdown"); return
+
     # ── Новый долг ──
-    if any(kw in lower for kw in ["дал в долг","одолжил","дала в долг","долг"]):
+    debt_triggers = ["дал в долг","одолжил","дала в долг","долг","занял","дал папе","дал маме","дал другу"]
+    if any(kw in lower for kw in debt_triggers) or (
+        any(kw in lower for kw in ["дал","дала","дали"]) and re.search(r'\d', text)
+    ):
         try:
-            parsed = parse_debt(text)
+            ctx = get_ctx(chat_id)
+            parsed = parse_debt(text, ctx.get("last_name",""))
             ams = parsed.get("amounts",[])
             if not ams and parsed.get("amount"):
                 ams = [{"amount":float(parsed["amount"]),"currency":"UAH"}]
             if ams and parsed.get("name"):
+                # Проверяем — может такой долг уже есть, тогда добавляем
+                name_low = parsed["name"].lower()
+                existing_did = next((k for k,d in debts.items() if name_low in d["name"].lower()), None)
+                if existing_did:
+                    # Добавляем к существующему
+                    ex_ams = debts[existing_did].get("amounts",[])
+                    for na in ams:
+                        cur = na.get("currency","UAH")
+                        found = next((a for a in ex_ams if a.get("currency","UAH")==cur), None)
+                        if found: found["amount"] = float(found["amount"]) + float(na["amount"])
+                        else: ex_ams.append(na)
+                    debts[existing_did]["amounts"] = ex_ams
+                    update_debt_amounts(existing_did, ex_ams)
+                    set_ctx(chat_id, last_name=parsed["name"], last_action="debt_add")
+                    await update.message.reply_text(
+                        f"➕ *{parsed['name']}* — долг обновлён\n💰 Итого: {format_amounts(ex_ams)}",
+                        parse_mode="Markdown"); return
+                # Новый долг
                 debt_counter[0] += 1
                 did = str(debt_counter[0])
                 date_str = datetime.now().strftime("%d.%m.%Y")
@@ -1379,8 +1459,11 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
                 context.job_queue.run_once(send_debt_reminder, when=interval,
                     data={"debt_id":did,"chat_id":chat_id}, name=f"debt_{did}")
                 note = f"\n📝 {parsed['note']}" if parsed.get("note") else ""
+                set_ctx(chat_id, last_name=parsed["name"], last_action="debt_new")
                 await update.message.reply_text(
-                    f"💸 *Долг записан!*\n\n👤 *{parsed['name']}*\n💰 {format_amounts(ams)}{note}\n\n⏰ Напомню через {reminder_label(chat_id)}.",
+                    f"💸 *Долг записан!*\n\n👤 *{parsed['name']}*\n💰 {format_amounts(ams)}{note}\n\n"
+                    f"_Если нужно добавить ещё — просто напиши «ещё 500»_\n\n"
+                    f"⏰ Напомню через {reminder_label(chat_id)}.",
                     parse_mode="Markdown"); return
         except Exception as e: logger.error(f"debt_new: {e}")
 
