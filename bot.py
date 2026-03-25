@@ -484,6 +484,9 @@ def set_ctx(chat_id, **kwargs):
     if cid not in _conv_context:
         _conv_context[cid] = {}
     _conv_context[cid].update(kwargs)
+
+# ── ДОЛГИ ────────────────────────────────────────────────────────────────────
+debts: dict = {}
 debt_counter = [0]
 
 def _debts_sheet():
