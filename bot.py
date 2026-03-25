@@ -1257,8 +1257,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ROUTER_SYSTEM = """Ты — мозг финансового Telegram-бота. Твоя задача: понять намерение пользователя и вернуть JSON с командой.
 
 ДОСТУПНЫЕ КОМАНДЫ:
-- "expense"     — записать трату(ы). Поля: expenses: [{amount, category, description, emoji}]
-- "debt_new"    — записать новый долг. Поля: name, amounts:[{amount,currency}], note
+- "expense"     — записать трату(ы). Поля: expenses: [{{amount, category, description, emoji}}]
+- "debt_new"    — записать новый долг. Поля: name, amounts:[{{amount,currency}}], note
 - "debt_add"    — добавить к существующему долгу. Поля: name, amount, currency
 - "debt_return" — отметить возврат долга. Поля: name, amount, currency
 - "budget_set"  — установить бюджет. Поля: amount
