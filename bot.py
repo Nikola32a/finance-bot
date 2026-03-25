@@ -901,38 +901,72 @@ def build_comparison() -> str:
         prev_total = s["total"]
     return "\n".join(lines)
 
-def build_past_self() -> str:
+async def build_past_self_ai(chat_id) -> str:
+    """ИИ анализирует динамику трат vs прошлые месяцы"""
     all_recs = get_all_records()
     now = datetime.now()
+
     def ms(ago):
         t = now.replace(day=1)
-        for _ in range(ago): t = (t-timedelta(days=1)).replace(day=1)
+        for _ in range(ago): t = (t - timedelta(days=1)).replace(day=1)
         return analyze_records(records_for_month(t.month, t.year, all_recs)), t
+
     cur = analyze_records(get_current_month_records())
-    if not cur: return "📭 Недостаточно данных."
-    lines = ["🪞 *Сравнение с прошлым «я»*\n"]
-    oldest = None
+    if not cur: return "📭 Недостаточно данных — запиши хотя бы несколько трат."
+
+    # Собираем данные для ИИ
+    data_lines = [f"Текущий месяц ({month_name(now.month)}): {fmt(cur['total'])} ₴"]
+    cats_cur = ", ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(cur["by_category"].items(), key=lambda x:-x[1])[:5])
+    data_lines.append(f"Категории: {cats_cur}")
+
+    history_parts = []
     for ago, label in [(1,"1 месяц назад"),(2,"2 месяца назад"),(3,"3 месяца назад")]:
         s, t = ms(ago)
         if not s: continue
+        diff = int((cur["total"] - s["total"]) / s["total"] * 100) if s["total"] else 0
+        history_parts.append(f"{month_name(t.month)}: {fmt(s['total'])} ₴ ({'+' if diff>0 else ''}{diff}% vs сейчас)")
+        cats_h = ", ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1])[:3])
+        history_parts.append(f"  категории: {cats_h}")
+
+    if not history_parts:
+        return "📭 Нужно минимум 2 месяца данных для сравнения."
+
+    data_lines.append("\nИстория:")
+    data_lines.extend(history_parts)
+
+    prompt = f"""Ты финансовый аналитик. Проанализируй динамику трат пользователя и дай персональный инсайт.
+
+ДАННЫЕ:
+{chr(10).join(data_lines)}
+
+Напиши анализ в формате:
+- Заголовок 🪞 *Сравнение с прошлым «я»*
+- 2-3 конкретных наблюдения с цифрами (тратит больше/меньше, в каких категориях изменения)
+- 1 короткий вывод или совет
+- Тон: дружелюбный, без воды, с эмодзи
+- Длина: 5-8 строк максимум"""
+
+    messages = [{"role":"system","content":"Отвечай только на русском. Используй Markdown (жирный через *). Без лишних слов."},
+                {"role":"user","content":prompt}]
+    try:
+        return groq_chat(messages, max_tokens=400)
+    except:
+        return build_past_self_fallback(cur, ms)
+
+def build_past_self_fallback(cur, ms_fn) -> str:
+    """Запасной вариант без ИИ"""
+    now = datetime.now()
+    lines = ["🪞 *Сравнение с прошлым «я»*\n"]
+    for ago, label in [(1,"1 мес"),(2,"2 мес"),(3,"3 мес")]:
+        s, t = ms_fn(ago)
+        if not s: continue
         diff = int((cur["total"]-s["total"])/s["total"]*100)
-        arrow = "📈" if diff>0 else "📉"
         sign = "+" if diff>0 else ""
-        verb = "больше" if diff>0 else "меньше"
-        lines.append(f"{arrow} *{label}* ({month_name(t.month)}):\n   {sign}{diff}% — тратишь на *{fmt(abs(cur['total']-s['total']))} ₴ {verb}*")
-        oldest = (s, label)
-    if oldest:
-        s, label = oldest
-        diffs = [(cat, cur["by_category"].get(cat,0)-s["by_category"].get(cat,0))
-                 for cat in set(list(cur["by_category"])+list(s["by_category"]))]
-        cat_lines = [f"{get_category_emoji(c)} {c}: {'📈 +' if d>0 else '📉 '}{fmt(d)} ₴"
-                     for c,d in diffs if abs(d)>100]
-        if cat_lines:
-            lines.append(f"\n📊 *Изменения vs {label}:*")
-            lines += cat_lines
+        lines.append(f"{'📈' if diff>0 else '📉'} *{label} назад* ({month_name(t.month)}): {sign}{diff}%")
     return "\n".join(lines)
 
-def build_habits() -> str:
+async def build_habits_ai() -> str:
+    """ИИ анализирует привычки и считает их стоимость"""
     all_recs = get_all_records()
     months: dict = {}
     for r in all_recs:
@@ -941,8 +975,9 @@ def build_habits() -> str:
             months.setdefault((d.year,d.month),[]).append(r)
         except: pass
     if not months: return "📭 Недостаточно данных."
-    n = max(len(months),1)
-    desc_data: dict = defaultdict(lambda:{"total":0.0,"count":0,"months":set()})
+
+    n = max(len(months), 1)
+    desc_data: dict = defaultdict(lambda: {"total":0.0,"count":0,"months":set()})
     for ym, recs in months.items():
         sk = get_sum_key(recs)
         for r in recs:
@@ -952,45 +987,106 @@ def build_habits() -> str:
                 desc_data[desc]["total"] += amt
                 desc_data[desc]["count"] += 1
                 desc_data[desc]["months"].add(ym)
-    habits = {k:v for k,v in desc_data.items() if len(v["months"])>=2 and v["total"]/n>=200}
-    if not habits: return "📭 Пока мало данных. Записывай траты ещё несколько недель!"
-    lines = ["💸 *Стоимость привычек*\n"]
-    for desc, d in sorted(habits.items(), key=lambda x:-x[1]["total"])[:6]:
-        monthly = d["total"]/n
-        annual = monthly*12
-        equiv = next((label for thr,label in EQUIVALENTS if annual>=thr*0.7), None)
-        lines += [f"*{desc.capitalize()}*",
-                  f"  📅 В месяц: *{fmt(monthly)} ₴*",
-                  f"  📆 В год: *{fmt(annual)} ₴*"]
-        if equiv: lines.append(f"  💡 Это = {equiv}")
-        lines.append("")
-    return "\n".join(lines)
 
-def build_advice(records: list) -> str:
-    if not records or len(records) < 5: return ""
+    habits = {k:v for k,v in desc_data.items() if len(v["months"])>=2 and v["total"]/n>=200}
+    if not habits: return "📭 Пока мало данных. Записывай траты несколько недель — и я найду паттерны!"
+
+    # Данные для ИИ
+    habits_text = []
+    for desc, d in sorted(habits.items(), key=lambda x:-x[1]["total"])[:8]:
+        monthly = d["total"] / n
+        annual = monthly * 12
+        habits_text.append(f"- {desc}: {fmt(monthly)}₴/мес, {fmt(annual)}₴/год ({d['count']} раз)")
+
+    prompt = f"""Ты финансовый аналитик. Проанализируй регулярные траты пользователя.
+
+ПРИВЫЧКИ (повторяются 2+ месяца):
+{chr(10).join(habits_text)}
+
+Напиши анализ:
+- Заголовок 💸 *Стоимость привычек*
+- Для каждой привычки: сумма в месяц и год, и с чем можно сравнить (например "это = 3 поездки в кино")
+- Выдели 1-2 привычки где можно сэкономить (если такие есть)
+- Тон: без осуждения, с юмором где уместно, с эмодзи
+- Длина: компактно, без воды"""
+
+    messages = [{"role":"system","content":"Отвечай только на русском. Markdown через *. Кратко и по делу."},
+                {"role":"user","content":prompt}]
+    try:
+        return groq_chat(messages, max_tokens=500)
+    except:
+        # Fallback
+        lines = ["💸 *Стоимость привычек*\n"]
+        for desc, d in sorted(habits.items(), key=lambda x:-x[1]["total"])[:6]:
+            monthly = d["total"]/n
+            annual = monthly*12
+            equiv = next((label for thr,label in EQUIVALENTS if annual>=thr*0.7), None)
+            lines += [f"*{desc.capitalize()}*", f"  📅 {fmt(monthly)} ₴/мес · 📆 {fmt(annual)} ₴/год"]
+            if equiv: lines.append(f"  💡 = {equiv}")
+            lines.append("")
+        return "\n".join(lines)
+
+async def build_advice_ai(chat_id) -> str:
+    """ИИ даёт персональные советы на основе реальных данных"""
+    recs = get_current_month_records()
+    if not recs or len(recs) < 3:
+        return "📭 Маловато данных для советов — запиши хотя бы 5-10 трат."
+
+    s = analyze_records(recs)
+    now = datetime.now()
+    avg = s["total"] / now.day if now.day else 0
+    bs = get_budget_status(chat_id)
+    sal = get_salary_info(chat_id)
+
+    # Контекст
+    cats = ", ".join(f"{c}: {fmt(a)}₴ ({int(a/s['total']*100)}%)" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1]))
+    budget_info = f"Бюджет: {fmt(bs['budget'])}₴, использовано {bs['percent']}%, осталось {fmt(bs['left'])}₴" if bs else "бюджет не установлен"
+    salary_info = f"Зарплата: {sal.get('amount','?')}₴, {sal['day']}-е число" if sal else "зарплата не указана"
+    leaks = ", ".join(f"{k} ({v['count']}×={fmt(v['total'])}₴)" for k,v in list(s.get("leaks",{}).items())[:3])
+
+    prompt = f"""Ты личный финансовый советник. Дай конкретные советы на основе данных пользователя.
+
+ДАННЫЕ за {month_name(now.month)}:
+- Потрачено: {fmt(s['total'])}₴ за {now.day} дней, среднее {fmt(avg)}₴/день
+- Прогноз на месяц: {fmt(avg*30)}₴
+- Категории: {cats}
+- {budget_info}
+- {salary_info}
+- Частые траты: {leaks or 'нет'}
+- Активные цели: {", ".join(f"{g['name']}: {fmt(g['saved'])}/{fmt(g['target'])}₴" for g in goals.values()) or 'нет'}
+
+Напиши 3-4 конкретных совета:
+- Заголовок 💡 *Персональные советы*
+- Каждый совет с конкретной цифрой ("если сократить X на 20% — сэкономишь Y₴")
+- Если есть цели — упомяни как туда быстрее накопить
+- Тон: дружелюбный, практичный, без банальщины
+- Длина: 6-10 строк"""
+
+    messages = [{"role":"system","content":"Отвечай только на русском. Markdown через *. Конкретные цифры важны."},
+                {"role":"user","content":prompt}]
+    try:
+        return groq_chat(messages, max_tokens=500)
+    except:
+        return build_advice_fallback(recs)
+
+def build_advice_fallback(records: list) -> str:
+    if not records: return ""
     s = analyze_records(records)
+    if not s: return ""
     total = s["total"]
     bc = s["by_category"]
     tips = []
     food = bc.get("Еда / продукты",0)
     if food > total*0.35:
-        tips.append(f"🍔 На еду {int(food/total*100)}%. Сократить на 25% = *+{fmt(food*0.25)} ₴/мес*")
-    ent = bc.get("Развлечения",0)
-    if ent > total*0.20:
-        tips.append(f"🎮 Развлечения {int(ent/total*100)}%. Сократить на 30% = *+{fmt(ent*0.30)} ₴*")
+        tips.append(f"🍔 На еду {int(food/total*100)}%. −25% = *+{fmt(food*0.25)} ₴/мес*")
     nic = bc.get("Никотин",0)
     if nic > 500:
-        tips.append(f"🚬 Никотин: *{fmt(nic)} ₴/мес* = *{fmt(nic*12)} ₴/год* 💭")
-    if s.get("leaks"):
-        top = max(s["leaks"].items(), key=lambda x:x[1]["total"])
-        if top[1]["total"] > 300:
-            tips.append(f"💸 «{top[0]}» — {top[1]['count']} раз = *{fmt(top[1]['total'])} ₴*")
-    if not tips: return ""
-    lines = ["💡 *Персональные советы:*\n"]
-    lines += [f"{i}. {t}" for i,t in enumerate(tips[:4],1)]
-    return "\n".join(lines)
+        tips.append(f"🚬 Никотин: *{fmt(nic)} ₴/мес* = *{fmt(nic*12)} ₴/год*")
+    if not tips: return "💡 Трать осознанно!"
+    return "💡 *Советы:*\n" + "\n".join(f"{i}. {t}" for i,t in enumerate(tips,1))
 
 def build_insight() -> str:
+    """Базовый инсайт для еженедельного уведомления (синхронный)"""
     recs = get_week_records()
     month_recs = get_current_month_records()
     if not recs: return "📭 За эту неделю данных нет."
@@ -1004,13 +1100,11 @@ def build_insight() -> str:
     if s["by_category"]:
         tc = max(s["by_category"], key=s["by_category"].get)
         pct = int(s["by_category"][tc]/s["total"]*100)
-        lines.append(f"{get_category_emoji(tc)} Топ категория: *{tc}* — {pct}%")
+        lines.append(f"{get_category_emoji(tc)} Топ: *{tc}* — {pct}%")
     if month_recs:
         ms = analyze_records(month_recs)
         avg_day = ms["total"]/datetime.now().day
         lines.append(f"📈 Прогноз месяца: *~{fmt(avg_day*30)} ₴*")
-    advice = build_advice(month_recs)
-    if advice: lines.append(f"\n{advice}")
     return "\n".join(lines)
 
 # ── УМНЫЕ УВЕДОМЛЕНИЯ (НОВОЕ) ─────────────────────────────────────────────────
@@ -1072,7 +1166,7 @@ async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
 MAIN_KB = ReplyKeyboardMarkup([
     [KeyboardButton("💰 Финансы"), KeyboardButton("📊 Аналитика")],
     [KeyboardButton("💸 Долги"),   KeyboardButton("🎯 Цели")],
-    [KeyboardButton("🤖 Спросить ИИ"), KeyboardButton("⚙️ Прочее")],
+    [KeyboardButton("⚙️ Прочее")],
 ], resize_keyboard=True)
 
 def inline_kb(buttons: list[list]) -> InlineKeyboardMarkup:
@@ -1192,21 +1286,6 @@ async def cmd_rates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await build_rates_msg()
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Включает режим ИИ-чата"""
-    chat_id = update.effective_chat.id
-    context.user_data["ai_mode"] = True
-    _ai_chat_history[chat_id] = []  # сброс истории диалога
-    await update.message.reply_text(
-        "🤖 *Режим AI-советника активирован!*\n\n"
-        "Задавай любые вопросы о своих финансах:\n"
-        "• «Сколько я потратил на еду в этом месяце?»\n"
-        "• «Как накопить на iPhone за 3 месяца?»\n"
-        "• «Проанализируй мои траты»\n"
-        "• «Дай совет по экономии»\n\n"
-        "_Для выхода нажми любую кнопку меню._",
-        parse_mode="Markdown")
-
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎙 Распознаю...")
     try:
@@ -1226,7 +1305,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     chat_id = update.effective_chat.id
 
-    # ── Кнопки меню — всегда приоритет, всегда сбрасывают режим ИИ ──
+    # ── Кнопки меню — всегда приоритет ──
     routes = {
         "📊 Статистика": cmd_stats, "📅 Отчёт за неделю": cmd_week,
         "📆 Отчёт за месяц": cmd_month, "💰 Бюджет": cmd_budget,
@@ -1234,30 +1313,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎯 Цели": cmd_goals, "💱 Курс валют": cmd_rates,
     }
     if text in routes:
-        context.user_data.pop("ai_mode", None)
         await routes[text](update, context); return
     if text == "💰 Финансы":
-        context.user_data.pop("ai_mode", None)
         await update.message.reply_text("💰 *Финансы*:", parse_mode="Markdown", reply_markup=FINANCE_KB); return
     if text == "📊 Аналитика":
-        context.user_data.pop("ai_mode", None)
         await update.message.reply_text("📊 *Аналитика*:", parse_mode="Markdown", reply_markup=ANALYTICS_KB); return
     if text == "⚙️ Прочее":
-        context.user_data.pop("ai_mode", None)
         await update.message.reply_text("⚙️ *Прочее*:", parse_mode="Markdown", reply_markup=OTHER_KB); return
     if text == "🎯 Цели":
-        context.user_data.pop("ai_mode", None)
         await cmd_goals(update, context); return
-    if text == "🤖 Спросить ИИ":
-        await cmd_ai(update, context); return
 
-    # ── Режим ИИ-чата — активен только после явного нажатия кнопки/команды ──
-    if context.user_data.get("ai_mode"):
-        await update.message.reply_chat_action("typing")
-        response = await ai_chat_response(chat_id, text)
-        await update.message.reply_text(response, parse_mode="Markdown")
-        return
-
+    # Всё остальное — роутер ИИ обрабатывает сам
     await process(update, context, text)
 
 # ── ИИ-РОУТЕР — сердце бота ──────────────────────────────────────────────────
@@ -1693,26 +1759,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "compare": await send("⏳ Сравниваю..."); await send(build_comparison(), parse_mode="Markdown")
         elif action == "week": await send("⏳ Формирую..."); await send(build_weekly_report(), parse_mode="Markdown")
         elif action == "month": await send("⏳ Формирую..."); await send(build_monthly_report(), parse_mode="Markdown")
-        elif action == "past": await send("⏳ Анализирую..."); await send(build_past_self(), parse_mode="Markdown")
-        elif action == "habits": await send("⏳ Считаю..."); await send(build_habits(), parse_mode="Markdown")
+        elif action == "past":
+            await send("⏳ ИИ анализирует твою динамику...")
+            await send(await build_past_self_ai(chat_id), parse_mode="Markdown")
+        elif action == "habits":
+            await send("⏳ ИИ ищет паттерны...")
+            await send(await build_habits_ai(), parse_mode="Markdown")
         elif action == "rates": await send("⏳ Запрашиваю курс НБУ..."); await send(await build_rates_msg(), parse_mode="Markdown")
         elif action == "advice":
-            await send("⏳ Анализирую...")
-            recs = get_current_month_records()
-            msg = build_advice(recs) or "📭 Пока недостаточно данных."
-            insight = build_insight()
-            await send(f"{msg}\n\n{insight}" if msg and insight else msg or insight, parse_mode="Markdown")
+            await send("⏳ ИИ готовит персональные советы...")
+            await send(await build_advice_ai(chat_id), parse_mode="Markdown")
         elif action == "reminder":
             cur = reminder_label(chat_id)
             await context.bot.send_message(chat_id=chat_id,
                 text=f"⏰ *Напоминания*\n\nТекущий: *{cur}*\n\nВыбери:", parse_mode="Markdown", reply_markup=REMINDER_KB)
         elif action == "categories":
             cats = get_all_categories()
-            user_cats = _user_categories
             lines = ["🏷 *Категории:*\n"]
             lines += [f"{get_category_emoji(c)} {c}" for c in cats]
-            if not user_cats:
-                lines.append("\n_Добавь свою: «Добавь категорию Инвестиции»_")
+            if not _user_categories:
+                lines.append("\n_Добавь свою: напиши «Добавь категорию Инвестиции»_")
             await send("\n".join(lines), parse_mode="Markdown")
         return
 
@@ -1904,7 +1970,7 @@ def main():
         ("start",cmd_start), ("stats",cmd_stats), ("week",cmd_week),
         ("month",cmd_month), ("budget",cmd_budget), ("salary",cmd_salary),
         ("debts",cmd_debts), ("reminder",cmd_reminder), ("goals",cmd_goals),
-        ("rates",cmd_rates), ("ai",cmd_ai),
+        ("rates",cmd_rates),
     ]:
         app.add_handler(CommandHandler(cmd, handler))
 
