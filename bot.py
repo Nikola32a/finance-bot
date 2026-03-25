@@ -1153,14 +1153,15 @@ async def cmd_rates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Переключение в режим ИИ-чата"""
+    """Включает режим ИИ-чата"""
     chat_id = update.effective_chat.id
-    _ai_chat_history[chat_id] = []  # сброс истории
+    context.user_data["ai_mode"] = True
+    _ai_chat_history[chat_id] = []  # сброс истории диалога
     await update.message.reply_text(
         "🤖 *Режим AI-советника активирован!*\n\n"
         "Задавай любые вопросы о своих финансах:\n"
         "• «Сколько я потратил на еду в этом месяце?»\n"
-        "• «Как мне накопить на iPhone за 3 месяца?»\n"
+        "• «Как накопить на iPhone за 3 месяца?»\n"
         "• «Проанализируй мои траты»\n"
         "• «Дай совет по экономии»\n\n"
         "_Для выхода нажми любую кнопку меню._",
@@ -1184,7 +1185,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     chat_id = update.effective_chat.id
-    
+
+    # ── Кнопки меню — всегда приоритет, всегда сбрасывают режим ИИ ──
     routes = {
         "📊 Статистика": cmd_stats, "📅 Отчёт за неделю": cmd_week,
         "📆 Отчёт за месяц": cmd_month, "💰 Бюджет": cmd_budget,
@@ -1192,20 +1194,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎯 Цели": cmd_goals, "💱 Курс валют": cmd_rates,
     }
     if text in routes:
+        context.user_data.pop("ai_mode", None)
         await routes[text](update, context); return
     if text == "💰 Финансы":
+        context.user_data.pop("ai_mode", None)
         await update.message.reply_text("💰 *Финансы*:", parse_mode="Markdown", reply_markup=FINANCE_KB); return
     if text == "📊 Аналитика":
+        context.user_data.pop("ai_mode", None)
         await update.message.reply_text("📊 *Аналитика*:", parse_mode="Markdown", reply_markup=ANALYTICS_KB); return
     if text == "⚙️ Прочее":
+        context.user_data.pop("ai_mode", None)
         await update.message.reply_text("⚙️ *Прочее*:", parse_mode="Markdown", reply_markup=OTHER_KB); return
     if text == "🎯 Цели":
+        context.user_data.pop("ai_mode", None)
         await cmd_goals(update, context); return
     if text == "🤖 Спросить ИИ":
         await cmd_ai(update, context); return
 
-    # Если активен режим ИИ-чата — направляем туда
-    if chat_id in _ai_chat_history:
+    # ── Режим ИИ-чата — активен только после явного нажатия кнопки/команды ──
+    if context.user_data.get("ai_mode"):
         await update.message.reply_chat_action("typing")
         response = await ai_chat_response(chat_id, text)
         await update.message.reply_text(response, parse_mode="Markdown")
