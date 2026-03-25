@@ -631,6 +631,61 @@ async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
         text=f"⏰ *Напоминание о долге*\n\n👤 *{d['name']}* должен {format_amounts(ams)}",
         parse_mode="Markdown", reply_markup=kb)
 
+async def send_weekly_insight(context: ContextTypes.DEFAULT_TYPE):
+    """Еженедельный инсайт по пятницам в 19:00"""
+    cid = (context.job.data or {}).get("chat_id") or CHAT_ID
+    if not cid: return
+    recs = get_week_records()
+    month_recs = get_current_month_records()
+    if not recs:
+        await context.bot.send_message(chat_id=cid, text="📭 За эту неделю данных нет.")
+        return
+    s = analyze_records(recs)
+    lines = ["🧠 *Инсайт недели*\n"]
+    if s["by_day"]:
+        td = max(s["by_day"], key=s["by_day"].get)
+        avg = s["total"] / 7
+        if s["by_day"][td] > avg * 1.5:
+            lines.append(f"📅 Дорогой день: *{td}* (+{int(s['by_day'][td]/avg*100-100)}% от среднего)")
+    if s["by_category"]:
+        tc = max(s["by_category"], key=s["by_category"].get)
+        pct = int(s["by_category"][tc] / s["total"] * 100)
+        lines.append(f"{get_category_emoji(tc)} Топ: *{tc}* — {pct}%")
+    if month_recs:
+        ms = analyze_records(month_recs)
+        avg_day = ms["total"] / datetime.now().day
+        lines.append(f"📈 Прогноз месяца: *~{fmt(avg_day*30)} ₴*")
+    lines.append(f"\n💰 За неделю: *{fmt(s['total'])} ₴* ({s['count']} записей)")
+    await context.bot.send_message(chat_id=cid, text="\n".join(lines), parse_mode="Markdown")
+
+async def send_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
+    """Утренняя сводка каждый день в 9:00"""
+    cid = (context.job.data or {}).get("chat_id") or CHAT_ID
+    if not cid: return
+    bs = get_budget_status(cid)
+    sal = get_salary_info(cid)
+    now = datetime.now()
+    lines = [f"☀️ *Доброе утро, {now.strftime('%d.%m')}!*\n"]
+    today_spent = sum_records(get_today_records())
+    if today_spent > 0:
+        lines.append(f"📌 Вчера потрачено: *{fmt(today_spent)} ₴*")
+    if bs:
+        days_left = 30 - now.day + 1
+        daily_limit = bs["left"] / max(days_left, 1)
+        lines.append(f"💰 Бюджет: *{bs['percent']}%* использован")
+        lines.append(f"📊 Лимит сегодня: *{fmt(daily_limit)} ₴*")
+    elif sal and sal.get("amount"):
+        spent = sum_records(get_current_month_records())
+        left = float(sal["amount"]) - spent
+        sal_day = sal["day"]
+        days_left = (sal_day - now.day) if now.day < sal_day else (
+            (datetime.now().replace(day=1) + timedelta(days=32)).replace(day=sal_day) - now
+        ).days
+        if days_left > 0:
+            lines.append(f"💵 До зарплаты *{fmt(left/max(days_left,1))} ₴/день*")
+    if len(lines) > 1:
+        await context.bot.send_message(chat_id=cid, text="\n".join(lines), parse_mode="Markdown")
+
 # ── КЛАВИАТУРА ───────────────────────────────────────────────────────────────
 MAIN_KB = ReplyKeyboardMarkup([
     [KeyboardButton("💰 Финансы"), KeyboardButton("📊 Аналитика")],
@@ -1465,24 +1520,27 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
+    # Загружаем данные с паузами чтобы не получить 429 от Google Sheets
+    import time
     load_settings()
-    load_debts()
-    load_goals()
+    time.sleep(1)
     load_user_categories()
+    time.sleep(1)
+    load_debts()
+    time.sleep(1)
+    load_goals()
 
     if CHAT_ID and app.job_queue:
-        # Еженедельный инсайт (пятница 19:00)
         app.job_queue.run_daily(
             send_weekly_insight,
             time=dtime(19, 0),
             days=(4,), data={"chat_id": CHAT_ID})
-        # Утреннее сводка (каждый день 9:00)
         app.job_queue.run_daily(
             send_morning_briefing,
             time=dtime(9, 0),
             data={"chat_id": CHAT_ID})
 
-    logger.info("AI-агент запущен! v4.0 🤖")
+    logger.info("AI-агент запущен! v5.0 🤖")
     app.run_polling()
 
 if __name__ == "__main__":
