@@ -1253,277 +1253,321 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await process(update, context, text)
 
-# ── ОСНОВНОЙ ОБРАБОТЧИК ───────────────────────────────────────────────────────
+# ── ИИ-РОУТЕР — сердце бота ──────────────────────────────────────────────────
+ROUTER_SYSTEM = """Ты — мозг финансового Telegram-бота. Твоя задача: понять намерение пользователя и вернуть JSON с командой.
+
+ДОСТУПНЫЕ КОМАНДЫ:
+- "expense"     — записать трату(ы). Поля: expenses: [{amount, category, description, emoji}]
+- "debt_new"    — записать новый долг. Поля: name, amounts:[{amount,currency}], note
+- "debt_add"    — добавить к существующему долгу. Поля: name, amount, currency
+- "debt_return" — отметить возврат долга. Поля: name, amount, currency
+- "budget_set"  — установить бюджет. Поля: amount
+- "salary_set"  — установить зарплату. Поля: day, amount (amount опционально)
+- "goal_new"    — создать финансовую цель. Поля: name, amount, emoji
+- "goal_deposit"— пополнить цель. Поля: amount, goal_name (опционально)
+- "convert"     — конвертировать валюту. Поля: amount, from_currency, to_currency
+- "question"    — вопрос или просьба о совете, анализе, помощи. Поля: text
+- "unknown"     — непонятно что делать
+
+КАТЕГОРИИ ТРАТ: "Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Никотин", "Другое"
+
+КОНТЕКСТ (предыдущий разговор): {context}
+
+АКТИВНЫЕ ДОЛГИ: {debts}
+АКТИВНЫЕ ЦЕЛИ: {goals}
+
+ПРАВИЛА:
+- Если пишет просто "снюс 800" — это expense, не вопрос
+- Если пишет "дал папе 200" — debt_new
+- Если пишет "ещё 500" после долга — debt_add с именем из контекста
+- Если пишет "папа вернул" — debt_return
+- Если спрашивает "сколько потратил", "как дела с бюджетом" — question
+- Числа типа "3к", "1.5к" — это тысячи (3000, 1500)
+- Понимай украинский и русский язык одинаково
+
+ВЕРНИ ТОЛЬКО JSON, никакого текста:
+{{"action": "<команда>", ...поля команды}}"""
+
+async def route_message(text: str, chat_id, conv_ctx: dict) -> dict:
+    """ИИ определяет что делать с сообщением"""
+    debts_info = ", ".join(f"{d['name']}: {format_amounts(d['amounts']).replace('*','')}" for d in list(debts.values())[:5]) or "нет"
+    goals_info = ", ".join(f"{g['name']}: {fmt(g['saved'])}/{fmt(g['target'])}₴" for g in list(goals.values())[:3]) or "нет"
+    ctx_info = f"последнее имя: {conv_ctx.get('last_name','нет')}, последнее действие: {conv_ctx.get('last_action','нет')}"
+
+    system = ROUTER_SYSTEM.format(context=ctx_info, debts=debts_info, goals=goals_info)
+    messages = [
+        {"role": "system", "content": system},
+        # Few-shot примеры
+        {"role": "user", "content": "снюс 800"},
+        {"role": "assistant", "content": '{"action":"expense","expenses":[{"amount":800,"category":"Никотин","description":"снюс","emoji":"🚬"}]}'},
+        {"role": "user", "content": "заправился на 1200 и мойка 350"},
+        {"role": "assistant", "content": '{"action":"expense","expenses":[{"amount":1200,"category":"Транспорт","description":"заправка","emoji":"⛽"},{"amount":350,"category":"Транспорт","description":"мойка","emoji":"🚿"}]}'},
+        {"role": "user", "content": "дал папе 500"},
+        {"role": "assistant", "content": '{"action":"debt_new","name":"Папа","amounts":[{"amount":500,"currency":"UAH"}],"note":""}'},
+        {"role": "user", "content": "ещё 300"},
+        {"role": "assistant", "content": '{"action":"debt_add","name":"Папа","amount":300,"currency":"UAH"}'},
+        {"role": "user", "content": "папа вернул всё"},
+        {"role": "assistant", "content": '{"action":"debt_return","name":"Папа","amount":null,"currency":"UAH"}'},
+        {"role": "user", "content": "бюджет на месяц 25000"},
+        {"role": "assistant", "content": '{"action":"budget_set","amount":25000}'},
+        {"role": "user", "content": "получаю зарплату 15го, 42000 гривен"},
+        {"role": "assistant", "content": '{"action":"salary_set","day":15,"amount":42000}'},
+        {"role": "user", "content": "хочу накопить на отпуск 60000"},
+        {"role": "assistant", "content": '{"action":"goal_new","name":"Отпуск","amount":60000,"emoji":"✈️"}'},
+        {"role": "user", "content": "отложил 2000 на цель"},
+        {"role": "assistant", "content": '{"action":"goal_deposit","amount":2000,"goal_name":""}'},
+        {"role": "user", "content": "сколько я потратил на еду в этом месяце?"},
+        {"role": "assistant", "content": '{"action":"question","text":"сколько я потратил на еду в этом месяце?"}'},
+        {"role": "user", "content": "100 долларов в гривны"},
+        {"role": "assistant", "content": '{"action":"convert","amount":100,"from_currency":"USD","to_currency":"UAH"}'},
+        {"role": "user", "content": text},
+    ]
+    try:
+        raw = _llm(messages, max_tokens=300, temperature=0.0)
+        raw = _extract_json(raw, "{")
+        return json.loads(raw)
+    except Exception as e:
+        logger.error(f"route_message error: {e} | raw: {raw if 'raw' in dir() else '?'}")
+        return {"action": "unknown"}
+
 async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     chat_id = update.effective_chat.id
-    lower = text.lower().strip()
+    conv_ctx = get_ctx(chat_id)
 
-    # ── Пополнение цели ("в цель 500", "накопил 1000 на iPhone") ──
-    goal_kw = any(kw in lower for kw in ["в цель","к цели","на цель","накопил","отложил","в копилку"])
-    if goal_kw and goals:
-        nums = re.findall(r'\d+(?:[.,]\d+)?', text)
-        if nums:
-            amount = float(nums[0].replace(",","."))
-            if len(goals) == 1:
-                gid = list(goals.keys())[0]
-                g = goals[gid]
-                g["saved"] = min(g["saved"] + amount, g["target"])
-                update_goal_saved(gid, g["saved"])
-                pct = min(int(g["saved"]/g["target"]*100), 100)
-                bar = build_goal_bar(g["saved"], g["target"])
-                msg = f"🎯 *{g['name']}*\n[{bar}] {pct}%\n{fmt(g['saved'])} / {fmt(g['target'])} ₴"
-                if g["saved"] >= g["target"]:
-                    msg += "\n\n🎉 *Цель достигнута!* Поздравляю!"
-                    goals.pop(gid); close_goal(gid)
-                await update.message.reply_text(msg, parse_mode="Markdown"); return
-            else:
-                # Несколько целей — выбор
-                kb = [[( f"{g['emoji']} {g['name']}", f"goal_add_{gid}_{amount}")] for gid, g in goals.items()]
-                await update.message.reply_text(f"💰 *{fmt(amount)} ₴* — к какой цели?",
-                    parse_mode="Markdown", reply_markup=inline_kb(kb)); return
+    await update.message.reply_chat_action("typing")
+    route = await route_message(text, chat_id, conv_ctx)
+    action = route.get("action", "unknown")
+    logger.info(f"Router: '{text}' → {action}")
 
-    # ── Новая цель ("цель iPhone 25000") ──
-    if any(kw in lower for kw in ["цель","копить на","накопить на"]):
-        parsed = parse_goal(text)
-        if parsed and parsed.get("amount"):
-            goal_counter[0] += 1
-            gid = str(goal_counter[0])
-            date_str = datetime.now().strftime("%d.%m.%Y")
-            goals[gid] = {
-                "name": parsed["name"], "target": float(parsed["amount"]),
-                "saved": 0.0, "date": date_str, "emoji": parsed.get("emoji","🎯")
-            }
-            save_goal_to_sheet(gid, parsed["name"], float(parsed["amount"]), 0, date_str, parsed.get("emoji","🎯"))
-            bar = build_goal_bar(0, float(parsed["amount"]))
-            await update.message.reply_text(
-                f"{parsed.get('emoji','🎯')} *Цель создана!*\n\n*{parsed['name']}*\n[{bar}] 0%\n0 / {fmt(parsed['amount'])} ₴\n\n"
-                f"_Говори «Отложил 500» или «В цель 1000» — буду отслеживать!_",
-                parse_mode="Markdown"); return
-
-    # ── Вопрос к ИИ (свободный вопрос) ──
-    ai_triggers = ["?","сколько","почему","как","посоветуй","проанализируй","помоги","скажи","можешь","расскажи"]
-    if any(t in lower for t in ai_triggers) and len(text) > 10:
-        await update.message.reply_chat_action("typing")
-        response = await ai_chat_response(chat_id, text)
-        await update.message.reply_text(response, parse_mode="Markdown")
-        return
-
-    # ── Конвертация валют ("100 долларов в гривны") ──
-    conv_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(долл?ар[ыаов]*|usd|\$|евро|eur|€|грив[еньни]*|uah|₴)', lower)
-    if conv_match and any(kw in lower for kw in ["в гривн","в uah","в долл","в евро","конверт","курс"]):
-        amount = float(conv_match.group(1).replace(",","."))
-        cur_raw = conv_match.group(2)
-        cur_map = {"доллар":"USD","долар":"USD","usd":"USD","$":"USD","евро":"EUR","eur":"EUR","€":"EUR"}
-        currency = next((v for k,v in cur_map.items() if k in cur_raw), "UAH")
-        uah = await convert_to_uah(amount, currency)
-        sym = CURRENCY_SYMBOLS.get(currency,"₴")
-        await update.message.reply_text(
-            f"💱 *{fmt(amount)} {sym}* = *{fmt(uah)} ₴*\n_(по курсу НБУ)_",
-            parse_mode="Markdown"); return
-
-    # ── Пользовательская категория ("добавь категорию Инвестиции") ──
-    if any(kw in lower for kw in ["добавь категорию","новая категория","создай категорию"]):
-        words = text.split()
-        for i, w in enumerate(words):
-            if w.lower() in ["категорию","категория"] and i+1 < len(words):
-                new_cat = " ".join(words[i+1:]).strip().capitalize()
-                save_user_category(new_cat)
-                await update.message.reply_text(
-                    f"✅ Категория *{new_cat}* добавлена!\nТеперь её можно использовать в записях.",
-                    parse_mode="Markdown"); return
-
-    # ── Бюджет ──
-    if any(kw in lower for kw in ["бюджет","лимит"]):
-        nums = re.findall(r'\d+(?:[.,]\d+)?', text)
-        if nums:
-            budget = float(nums[0].replace(",","."))
-            save_setting(f"budget_{chat_id}", str(budget))
-            bs = get_budget_status(chat_id)
-            if bs:
-                bar = "█"*(bs["percent"]//10) + "░"*(10-bs["percent"]//10)
-                await update.message.reply_text(
-                    f"💰 *Бюджет установлен: {fmt(budget)} ₴*\n\n[{bar}] {bs['percent']}% использовано",
-                    parse_mode="Markdown")
-            else:
-                await update.message.reply_text(f"💰 *Бюджет установлен: {fmt(budget)} ₴*", parse_mode="Markdown")
-            return
-
-    # ── Зарплата ──
-    if any(kw in lower for kw in ["зарплата","получка","salary"]):
-        nums = re.findall(r'\d+', text)
-        if nums:
-            day = int(nums[0])
-            amount = float(nums[1]) if len(nums) > 1 else None
-            if 1 <= day <= 31:
-                set_salary_info(chat_id, day, amount)
-                amt_str = f" — *{fmt(amount)} ₴*" if amount else ""
-                await update.message.reply_text(
-                    f"💵 *Зарплата установлена!*\n📅 День: *{day}-е число*{amt_str}",
-                    parse_mode="Markdown"); return
-
-    # ── Возврат долга ──
-    if any(kw in lower for kw in ["отдал","вернул","отдала","вернула","погасил","расплатился"]):
-        try:
-            ctx = get_ctx(chat_id)
-            parsed = parse_debt(text, ctx.get("last_name",""))
-            ams = parsed.get("amounts",[])
-            if not ams and parsed.get("amount"):
-                ams = [{"amount":float(parsed["amount"]),"currency":"UAH"}]
-            if ams and parsed.get("name"):
-                name = parsed["name"].lower()
-                did = next((k for k,d in debts.items() if name in d["name"].lower()), None)
-                if not did:
-                    await update.message.reply_text(f"🤔 Не нашёл долга для *{parsed['name']}*.", parse_mode="Markdown"); return
-                d = debts[did]
-                ex_ams = d.get("amounts",[])
-                lines = [f"💰 *{d['name']}* вернул:\n"]
-                closed_curs = []
-                for ra in ams:
-                    cur = ra.get("currency","UAH")
-                    sym = CURRENCY_SYMBOLS.get(cur,"₴")
-                    for ea in ex_ams:
-                        if ea.get("currency","UAH") == cur:
-                            new = float(ea["amount"]) - float(ra["amount"])
-                            if new <= 0: closed_curs.append(cur); lines.append(f"✅ {sym}: закрыто")
-                            else: ea["amount"] = new; lines.append(f"💸 {sym}: {fmt(ra['amount'])} → остаток *{fmt(new)} {sym}*")
-                            break
-                ex_ams = [a for a in ex_ams if a.get("currency","UAH") not in closed_curs]
-                if not ex_ams:
-                    debts.pop(did); mark_paid(did); lines.append("\n🎉 *Долг полностью закрыт!*")
-                else:
-                    debts[did]["amounts"] = ex_ams; update_debt_amounts(did, ex_ams)
-                    lines.append(f"\n📊 Остаток: {format_amounts(ex_ams)}")
-                set_ctx(chat_id, last_name=d["name"], last_action="debt_return")
-                await update.message.reply_text("\n".join(lines), parse_mode="Markdown"); return
-        except Exception as e: logger.error(f"debt_return: {e}")
-
-    # ── Добавление к существующему долгу ("ещё 500", "плюс 300 папе") ──
-    add_kw = any(kw in lower for kw in ["ещё","еще","плюс","добав","доплат","и ещё","и еще"])
-    if add_kw:
-        ctx = get_ctx(chat_id)
-        last_name = ctx.get("last_name","")
-        nums = re.findall(r'\d+(?:[.,]\d+)?', text)
-        if nums and last_name:
-            # Ищем существующий долг по имени из контекста
-            did = next((k for k,d in debts.items() if last_name.lower() in d["name"].lower()), None)
-            if did:
-                amount = float(nums[0].replace(",","."))
-                ex_ams = debts[did].get("amounts",[])
-                for ea in ex_ams:
-                    if ea.get("currency","UAH") == "UAH":
-                        ea["amount"] = float(ea["amount"]) + amount
-                        break
-                else:
-                    ex_ams.append({"amount": amount, "currency": "UAH"})
-                debts[did]["amounts"] = ex_ams
-                update_debt_amounts(did, ex_ams)
-                set_ctx(chat_id, last_name=debts[did]["name"], last_action="debt_add")
-                await update.message.reply_text(
-                    f"➕ Добавил *{fmt(amount)} ₴* к долгу *{debts[did]['name']}*\n"
-                    f"💰 Итого: {format_amounts(ex_ams)}",
-                    parse_mode="Markdown"); return
-
-    # ── Новый долг ──
-    debt_triggers = ["дал в долг","одолжил","дала в долг","долг","занял","дал папе","дал маме","дал другу"]
-    if any(kw in lower for kw in debt_triggers) or (
-        any(kw in lower for kw in ["дал","дала","дали"]) and re.search(r'\d', text)
-    ):
-        try:
-            ctx = get_ctx(chat_id)
-            parsed = parse_debt(text, ctx.get("last_name",""))
-            ams = parsed.get("amounts",[])
-            if not ams and parsed.get("amount"):
-                ams = [{"amount":float(parsed["amount"]),"currency":"UAH"}]
-            if ams and parsed.get("name"):
-                # Проверяем — может такой долг уже есть, тогда добавляем
-                name_low = parsed["name"].lower()
-                existing_did = next((k for k,d in debts.items() if name_low in d["name"].lower()), None)
-                if existing_did:
-                    # Добавляем к существующему
-                    ex_ams = debts[existing_did].get("amounts",[])
-                    for na in ams:
-                        cur = na.get("currency","UAH")
-                        found = next((a for a in ex_ams if a.get("currency","UAH")==cur), None)
-                        if found: found["amount"] = float(found["amount"]) + float(na["amount"])
-                        else: ex_ams.append(na)
-                    debts[existing_did]["amounts"] = ex_ams
-                    update_debt_amounts(existing_did, ex_ams)
-                    set_ctx(chat_id, last_name=parsed["name"], last_action="debt_add")
-                    await update.message.reply_text(
-                        f"➕ *{parsed['name']}* — долг обновлён\n💰 Итого: {format_amounts(ex_ams)}",
-                        parse_mode="Markdown"); return
-                # Новый долг
-                debt_counter[0] += 1
-                did = str(debt_counter[0])
-                date_str = datetime.now().strftime("%d.%m.%Y")
-                debts[did] = {"name":parsed["name"],"amounts":ams,"date":date_str,"note":parsed.get("note","")}
-                save_debt(did, parsed["name"], ams, date_str, parsed.get("note",""))
-                interval = get_reminder_interval(chat_id)
-                context.job_queue.run_once(send_debt_reminder, when=interval,
-                    data={"debt_id":did,"chat_id":chat_id}, name=f"debt_{did}")
-                note = f"\n📝 {parsed['note']}" if parsed.get("note") else ""
-                set_ctx(chat_id, last_name=parsed["name"], last_action="debt_new")
-                await update.message.reply_text(
-                    f"💸 *Долг записан!*\n\n👤 *{parsed['name']}*\n💰 {format_amounts(ams)}{note}\n\n"
-                    f"_Если нужно добавить ещё — просто напиши «ещё 500»_\n\n"
-                    f"⏰ Напомню через {reminder_label(chat_id)}.",
-                    parse_mode="Markdown"); return
-        except Exception as e: logger.error(f"debt_new: {e}")
-
-    # ── Быстрый режим (просто число) ──
-    stripped = text.strip().replace(",",".").replace(" ","")
-    if re.fullmatch(r'\d+(\.\d+)?', stripped):
-        amount = float(stripped)
-        # Просто число — спрашиваем ИИ что это может быть или показываем категории
-        cats = get_all_categories()
-        kb = []
-        row = []
-        for cat in cats:
-            row.append((f"{get_category_emoji(cat)} {cat}", f"quick_{cat}_{amount}"))
-            if len(row) == 2: kb.append(row); row = []
-        if row: kb.append(row)
-        await update.message.reply_text(f"⚡ *{fmt(amount)} ₴* — что это?",
-            parse_mode="Markdown", reply_markup=inline_kb(kb))
-        return
-
-    # ── Обычные расходы ──
-    try:
-        expenses = parse_expenses(text)
+    # ── ТРАТА ──
+    if action == "expense":
+        expenses = route.get("expenses", [])
         if not expenses:
-            await update.message.reply_text(
-                "🤔 Не понял что записать.\n\n"
-                "Попробуй написать как обычно:\n"
-                "• «Снюс 800»\n• «Заправился на 1200, мойка 300»\n• «Взял кофе и круасан 185»\n\n"
-                "Или задай вопрос: «Сколько я потратил на еду?»"
-            ); return
+            await update.message.reply_text("🤔 Не понял сумму. Напиши например: «Кофе 85» или «Бензин 1200»"); return
         date = datetime.now().strftime("%d.%m.%Y %H:%M")
         month_recs = get_current_month_records()
         lines = ["✅ *Записано!*\n"]
         for exp in expenses:
-            amount = float(exp["amount"])
+            amount = float(str(exp.get("amount",0)).replace(",","."))
+            if amount <= 0: continue
             cat = fix_cat(exp.get("category","Другое"))
             desc = exp.get("description","—")
             emoji = exp.get("emoji","")
             save_expense(date, amount, cat, desc, text)
             lines.append(f"{emoji} *{desc}* — *{fmt(amount)} ₴*\n   _{get_category_emoji(cat)} {cat}_")
         if len(expenses) > 1:
-            lines.append(f"\n💰 *Итого: {fmt(sum(float(e['amount']) for e in expenses))} ₴*")
-        # Умный комментарий по категории
+            total = sum(float(str(e.get("amount",0)).replace(",",".")) for e in expenses)
+            lines.append(f"\n💰 *Итого: {fmt(total)} ₴*")
+        # Статус бюджета
         cat0 = fix_cat(expenses[0].get("category","Другое"))
         sk = get_sum_key(month_recs)
         cat_total = sum(float(r[sk]) for r in month_recs if fix_cat(r.get("Категория",""))==cat0 and r.get(sk))
         if cat_total > 0:
-            lines.append(f"\n_{get_category_emoji(cat0)} {cat0} в этом месяце: *{fmt(cat_total)} ₴*_")
-        # Предупреждения бюджета
+            lines.append(f"\n_{get_category_emoji(cat0)} {cat0} за месяц: *{fmt(cat_total)} ₴*_")
         bs = get_budget_status(chat_id)
         if bs:
             pct = bs["percent"]
-            if pct >= 90: lines.append(f"\n🔴 *Бюджет использован на {pct}%!*")
-            elif pct >= 70: lines.append(f"\n🟡 Бюджет использован на {pct}%")
+            if pct >= 90: lines.append(f"\n🔴 *Бюджет на {pct}%!*")
+            elif pct >= 70: lines.append(f"\n🟡 Бюджет на {pct}%")
+        set_ctx(chat_id, last_action="expense")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"process expenses: {e}")
-        await update.message.reply_text("❌ Ошибка при сохранении. Попробуй ещё раз.")
+
+    # ── НОВЫЙ ДОЛГ ──
+    elif action == "debt_new":
+        name = str(route.get("name","")).strip().capitalize()
+        ams = route.get("amounts", [])
+        if not ams:
+            amt = route.get("amount")
+            cur = route.get("currency","UAH")
+            if amt: ams = [{"amount":float(amt),"currency":cur}]
+        if not name or not ams:
+            await update.message.reply_text("🤔 Не понял кому и сколько. Например: «Дал Саше 500»"); return
+        # Если долг уже есть — добавляем
+        existing = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None)
+        if existing:
+            ex_ams = debts[existing].get("amounts",[])
+            for na in ams:
+                cur = na.get("currency","UAH")
+                found = next((a for a in ex_ams if a.get("currency","UAH")==cur), None)
+                if found: found["amount"] = float(found["amount"]) + float(na["amount"])
+                else: ex_ams.append(na)
+            debts[existing]["amounts"] = ex_ams
+            update_debt_amounts(existing, ex_ams)
+            set_ctx(chat_id, last_name=name, last_action="debt_add")
+            await update.message.reply_text(
+                f"➕ *{name}* — долг обновлён\n💰 Итого: {format_amounts(ex_ams)}", parse_mode="Markdown"); return
+        note = route.get("note","")
+        debt_counter[0] += 1
+        did = str(debt_counter[0])
+        date_str = datetime.now().strftime("%d.%m.%Y")
+        debts[did] = {"name":name,"amounts":ams,"date":date_str,"note":note}
+        save_debt(did, name, ams, date_str, note)
+        context.job_queue.run_once(send_debt_reminder, when=get_reminder_interval(chat_id),
+            data={"debt_id":did,"chat_id":chat_id}, name=f"debt_{did}")
+        set_ctx(chat_id, last_name=name, last_action="debt_new")
+        note_str = f"\n📝 {note}" if note else ""
+        await update.message.reply_text(
+            f"💸 *Долг записан!*\n\n👤 *{name}*\n💰 {format_amounts(ams)}{note_str}\n\n"
+            f"_Напиши «ещё 500» чтобы добавить к этому долгу_\n⏰ Напомню через {reminder_label(chat_id)}.",
+            parse_mode="Markdown")
+
+    # ── ДОБАВИТЬ К ДОЛГУ ──
+    elif action == "debt_add":
+        name = str(route.get("name", conv_ctx.get("last_name",""))).strip().capitalize()
+        amount = float(str(route.get("amount",0)).replace(",","."))
+        currency = route.get("currency","UAH")
+        did = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None)
+        if not did:
+            await update.message.reply_text(f"🤔 Не нашёл активного долга для *{name}*.", parse_mode="Markdown"); return
+        ex_ams = debts[did].get("amounts",[])
+        found = next((a for a in ex_ams if a.get("currency","UAH")==currency), None)
+        if found: found["amount"] = float(found["amount"]) + amount
+        else: ex_ams.append({"amount":amount,"currency":currency})
+        debts[did]["amounts"] = ex_ams
+        update_debt_amounts(did, ex_ams)
+        set_ctx(chat_id, last_name=debts[did]["name"], last_action="debt_add")
+        await update.message.reply_text(
+            f"➕ Добавил *{fmt(amount)} ₴* к долгу *{debts[did]['name']}*\n💰 Итого: {format_amounts(ex_ams)}",
+            parse_mode="Markdown")
+
+    # ── ВОЗВРАТ ДОЛГА ──
+    elif action == "debt_return":
+        name = str(route.get("name", conv_ctx.get("last_name",""))).strip().capitalize()
+        did = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None)
+        if not did:
+            await update.message.reply_text(f"🤔 Не нашёл долга для *{name}*.", parse_mode="Markdown"); return
+        d = debts[did]
+        ret_amount = route.get("amount")
+        if ret_amount:
+            # Частичный возврат
+            currency = route.get("currency","UAH")
+            ex_ams = d.get("amounts",[])
+            lines = [f"💰 *{d['name']}* вернул:\n"]
+            for ea in ex_ams:
+                if ea.get("currency","UAH") == currency:
+                    new = float(ea["amount"]) - float(ret_amount)
+                    if new <= 0:
+                        lines.append(f"✅ закрыто")
+                        ex_ams = [a for a in ex_ams if a.get("currency","UAH") != currency]
+                    else:
+                        ea["amount"] = new
+                        lines.append(f"💸 {fmt(ret_amount)} ₴ → остаток *{fmt(new)} ₴*")
+                    break
+            if not ex_ams:
+                debts.pop(did); mark_paid(did); lines.append("\n🎉 *Долг полностью закрыт!*")
+            else:
+                debts[did]["amounts"] = ex_ams; update_debt_amounts(did, ex_ams)
+                lines.append(f"\n📊 Остаток: {format_amounts(ex_ams)}")
+        else:
+            # Полное закрытие
+            ams = d.get("amounts",[])
+            debts.pop(did); mark_paid(did)
+            lines = [f"✅ *{d['name']}* вернул {format_amounts(ams)}\n\n🎉 *Долг закрыт!*"]
+        set_ctx(chat_id, last_name=d["name"], last_action="debt_return")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    # ── БЮДЖЕТ ──
+    elif action == "budget_set":
+        budget = float(str(route.get("amount",0)).replace(",","."))
+        if budget <= 0:
+            await update.message.reply_text("🤔 Не понял сумму бюджета."); return
+        save_setting(f"budget_{chat_id}", str(budget))
+        bs = get_budget_status(chat_id)
+        bar = "█"*(bs["percent"]//10) + "░"*(10-bs["percent"]//10) if bs else "░░░░░░░░░░"
+        pct = bs["percent"] if bs else 0
+        await update.message.reply_text(
+            f"💰 *Бюджет установлен: {fmt(budget)} ₴*\n[{bar}] {pct}% использовано", parse_mode="Markdown")
+
+    # ── ЗАРПЛАТА ──
+    elif action == "salary_set":
+        day = int(route.get("day", 1))
+        amount = route.get("amount")
+        if not 1 <= day <= 31:
+            await update.message.reply_text("🤔 Не понял день зарплаты."); return
+        set_salary_info(chat_id, day, float(amount) if amount else None)
+        amt_str = f" — *{fmt(float(amount))} ₴*" if amount else ""
+        await update.message.reply_text(
+            f"💵 *Зарплата установлена!*\n📅 День: *{day}-е число*{amt_str}", parse_mode="Markdown")
+
+    # ── НОВАЯ ЦЕЛЬ ──
+    elif action == "goal_new":
+        name = route.get("name","Цель")
+        target = float(str(route.get("amount",0)).replace(",","."))
+        emoji_g = route.get("emoji","🎯")
+        if target <= 0:
+            await update.message.reply_text("🤔 Не понял сумму цели."); return
+        goal_counter[0] += 1
+        gid = str(goal_counter[0])
+        date_str = datetime.now().strftime("%d.%m.%Y")
+        goals[gid] = {"name":name,"target":target,"saved":0.0,"date":date_str,"emoji":emoji_g}
+        save_goal_to_sheet(gid, name, target, 0, date_str, emoji_g)
+        bar = build_goal_bar(0, target)
+        await update.message.reply_text(
+            f"{emoji_g} *Цель создана!*\n\n*{name}*\n[{bar}] 0%\n0 / {fmt(target)} ₴\n\n"
+            f"_Говори «Отложил 500» — буду отслеживать!_", parse_mode="Markdown")
+
+    # ── ПОПОЛНЕНИЕ ЦЕЛИ ──
+    elif action == "goal_deposit":
+        amount = float(str(route.get("amount",0)).replace(",","."))
+        goal_name = route.get("goal_name","")
+        if not goals:
+            await update.message.reply_text("🎯 Целей нет. Создай: «Хочу накопить на отпуск 60000»"); return
+        if len(goals) == 1:
+            gid = list(goals.keys())[0]
+        elif goal_name:
+            gid = next((k for k,g in goals.items() if goal_name.lower() in g["name"].lower()), list(goals.keys())[0])
+        else:
+            kb = [[(f"{g['emoji']} {g['name']}", f"goal_add_{gid}_{amount}")] for gid, g in goals.items()]
+            await update.message.reply_text(f"💰 *{fmt(amount)} ₴* — к какой цели?",
+                parse_mode="Markdown", reply_markup=inline_kb(kb)); return
+        g = goals[gid]
+        g["saved"] = min(g["saved"] + amount, g["target"])
+        update_goal_saved(gid, g["saved"])
+        pct = min(int(g["saved"]/g["target"]*100), 100)
+        bar = build_goal_bar(g["saved"], g["target"])
+        msg = f"🎯 *{g['name']}*\n[{bar}] {pct}%\n{fmt(g['saved'])} / {fmt(g['target'])} ₴"
+        if g["saved"] >= g["target"]:
+            msg += "\n\n🎉 *Цель достигнута!* Поздравляю!"
+            goals.pop(gid); close_goal(gid)
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    # ── КОНВЕРТАЦИЯ ──
+    elif action == "convert":
+        amount = float(str(route.get("amount",0)).replace(",","."))
+        from_cur = route.get("from_currency","USD").upper()
+        to_cur = route.get("to_currency","UAH").upper()
+        uah = await convert_to_uah(amount, from_cur)
+        sym = CURRENCY_SYMBOLS.get(from_cur, from_cur)
+        await update.message.reply_text(
+            f"💱 *{fmt(amount)} {sym}* = *{fmt(uah)} ₴*\n_(по курсу НБУ)_", parse_mode="Markdown")
+
+    # ── ВОПРОС / СОВЕТ ──
+    elif action == "question":
+        response = await ai_chat_response(chat_id, text)
+        await update.message.reply_text(response, parse_mode="Markdown")
+
+    # ── НЕИЗВЕСТНО ──
+    else:
+        # Последняя попытка — может это трата?
+        expenses = parse_expenses(text)
+        if expenses:
+            date = datetime.now().strftime("%d.%m.%Y %H:%M")
+            lines = ["✅ *Записано!*\n"]
+            for exp in expenses:
+                amount = float(str(exp.get("amount",0)))
+                cat = fix_cat(exp.get("category","Другое"))
+                desc = exp.get("description","—")
+                emoji = exp.get("emoji","")
+                save_expense(date, amount, cat, desc, text)
+                lines.append(f"{emoji} *{desc}* — *{fmt(amount)} ₴*\n   _{get_category_emoji(cat)} {cat}_")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        else:
+            await update.message.reply_text(
+                "🤔 Не понял. Попробуй:\n"
+                "• *Трата:* «Кофе 85» или «Бензин 1200»\n"
+                "• *Долг:* «Дал Саше 500»\n"
+                "• *Вопрос:* «Сколько потратил на еду?»",
+                parse_mode="Markdown")
 
 # ── CALLBACK ─────────────────────────────────────────────────────────────────
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
