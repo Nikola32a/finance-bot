@@ -494,59 +494,59 @@ async def fetch_obmen_rates():
     if _obmen_cache and now_ts - _obmen_ts < 600:
         return _obmen_cache
 
-try:
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(
-            "https://obmen24.com.ua/api/quotes?city=lviv",
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json"
-            }
-        )
-        data = resp.json()
-
-    result = {}
-
-    for item in data:
-        cur = item.get("currency")
-        if cur in ("USD", "EUR"):
-            result[cur] = {
-                "buy": float(item.get("buy", 0)),
-                "sale": float(item.get("sale", 0)),
-            }
-
-    if result:
-        _obmen_cache = result
-        _obmen_ts = now_ts
-        logger.info(f"obmen24 API parsed: {result}")
-        return result
-
-    raise ValueError("empty API response")
-
-except Exception as e:
-    logger.error(f"obmen24 API error: {e}")
-
-    # fallback на Приват
     try:
-        async with httpx.AsyncClient(timeout=8) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
-                "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5"
+                "https://obmen24.com.ua/api/quotes?city=lviv",
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "application/json"
+                }
             )
             data = resp.json()
 
         result = {}
+
         for item in data:
-            ccy = item.get("ccy", "")
-            if ccy in ("USD", "EUR"):
-                result[ccy] = {
+            cur = item.get("currency")
+            if cur in ("USD", "EUR"):
+                result[cur] = {
                     "buy": float(item.get("buy", 0)),
                     "sale": float(item.get("sale", 0)),
                 }
 
-        return result
+        if result:
+            _obmen_cache = result
+            _obmen_ts = now_ts
+            logger.info(f"obmen24 API parsed: {result}")
+            return result
 
-    except:
-        return {}
+        raise ValueError("empty API response")
+
+    except Exception as e:
+        logger.error(f"obmen24 API error: {e}")
+
+        # fallback на Приват
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                resp = await client.get(
+                    "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5"
+                )
+                data = resp.json()
+
+            result = {}
+            for item in data:
+                ccy = item.get("ccy", "")
+                if ccy in ("USD", "EUR"):
+                    result[ccy] = {
+                        "buy": float(item.get("buy", 0)),
+                        "sale": float(item.get("sale", 0)),
+                    }
+
+            return result
+
+        except:
+            return {}
 
 async def build_rates_msg() -> str:
     nbu, mono, obmen = await asyncio.gather(
