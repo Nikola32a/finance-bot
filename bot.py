@@ -533,15 +533,11 @@ async def build_rates_msg() -> str:
         if nbu_rate:
             lines.append(f"🏛 НБУ: *{nbu_rate:.2f} ₴*")
         lines.append(f"```")
-        lines.append(f"           Моно    Приват")
+        lines.append(f"         Моно    Приват")
         lines.append(f"Купить   {mono_buy:<8}{ob_buy}")
         lines.append(f"Продать  {mono_sell:<8}{ob_sell}")
         lines.append(f"```")
         lines.append("")
-
-    gbp = nbu.get("GBP", 0)
-    if gbp:
-        lines.append(f"🇬🇧 *GBP* — НБУ: *{gbp:.2f} ₴*")
 
     return "\n".join(lines)
 
