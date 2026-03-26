@@ -109,18 +109,26 @@ _settings: dict = {}
 
 def _settings_sheet():
     sh = _get_worksheet("Настройки")
-    if not sh.get_all_values():
+    vals = sh.get_all_values()
+    # Создаём заголовки если лист пуст ИЛИ заголовки не те
+    if not vals or vals[0] != ["Ключ", "Значение"]:
+        sh.clear()
         sh.insert_row(["Ключ", "Значение"], 1)
     return sh
 
 def load_settings():
-    try:
-        data = {r["Ключ"]: str(r["Значение"]) for r in _settings_sheet().get_all_records()
-                if r.get("Ключ") and str(r.get("Значение","")) != ""}
-        _settings.update(data)
-        logger.info(f"Настройки загружены: {list(data.keys())}")
-    except Exception as e:
-        logger.error(f"load_settings: {e}")
+    import time as _time
+    for attempt in range(3):
+        try:
+            data = {r["Ключ"]: str(r["Значение"]) for r in _settings_sheet().get_all_records()
+                    if r.get("Ключ") and str(r.get("Значение","")) != ""}
+            _settings.update(data)
+            logger.info(f"Настройки загружены: {list(data.keys())}")
+            return
+        except Exception as e:
+            logger.error(f"load_settings attempt {attempt+1}: {e}")
+            if attempt < 2:
+                _time.sleep(2)
 
 def save_setting(key: str, value: str):
     _settings[key] = value
@@ -478,39 +486,48 @@ async def fetch_monobank_rates() -> dict:
         return {}
 
 async def fetch_obmen_rates() -> dict:
-    """Курс обменников с obmen24.com.ua/uk/lviv"""
+    """Курс обменників з obmen24.com.ua/uk/lviv"""
     global _obmen_cache, _obmen_ts
-    now = datetime.now(KYIV_TZ).timestamp()
-    if _obmen_cache and now - _obmen_ts < 600:
+    now_ts = datetime.now(KYIV_TZ).timestamp()
+    if _obmen_cache and now_ts - _obmen_ts < 600:
         return _obmen_cache
+    import re as _re
+    # Ключові слова для пошуку валюти в HTML (обмінник може писати EUR як € або Euro)
+    SEARCH_KEYS = {
+        "USD": ["USD", "Долар", "Dollar", "$"],
+        "EUR": ["EUR", "Євро", "Euro", "€"],
+    }
+    def _parse_rates_from_html(html: str) -> dict:
+        result = {}
+        # Всі числа що схожі на курс гривні (30..200)
+        num_pat = _re.compile(r"(\d{2,3}[.,]\d{1,4})")
+        for cur, keys in SEARCH_KEYS.items():
+            for key in keys:
+                idx = html.find(key)
+                if idx < 0:
+                    continue
+                # Беремо 600 символів після знаходження
+                chunk = html[idx:idx + 600]
+                nums = [float(n.replace(",", ".")) for n in num_pat.findall(chunk)
+                        if 30 < float(n.replace(",", ".")) < 200]
+                if len(nums) >= 2:
+                    result[cur] = {"buy": nums[0], "sale": nums[1]}
+                    break
+        return result
+
     try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
             resp = await client.get(
                 "https://obmen24.com.ua/uk/lviv",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0"}
             )
             html = resp.text
-        result = {}
-        import re as _re
-        # Ищем строки таблицы с курсами — обычно формат: USD ... buy ... sell
-        for cur in ("USD", "EUR"):
-            # Паттерн: ищем валюту и ближайшие числа вида 43.xx / 44.xx
-            pattern = _re.compile(
-                rf'{cur}.*?(\d{{2,3}}[.,]\d{{1,4}}).*?(\d{{2,3}}[.,]\d{{1,4}})',
-                _re.DOTALL | _re.IGNORECASE
-            )
-            m = pattern.search(html)
-            if m:
-                buy = float(m.group(1).replace(",", "."))
-                sell = float(m.group(2).replace(",", "."))
-                # Санитарная проверка — разумные курсы UAH
-                if 30 < buy < 200 and 30 < sell < 200:
-                    result[cur] = {"buy": buy, "sale": sell}
+        result = _parse_rates_from_html(html)
         if result:
             _obmen_cache = result
-            _obmen_ts = now
+            _obmen_ts = now_ts
+            logger.info(f"obmen24 parsed: {result}")
             return result
-        # Fallback: Приватбанк если парсинг не дал результат
         raise ValueError("obmen24 parse empty")
     except Exception as e:
         logger.error(f"obmen24 rates: {e}")
@@ -533,20 +550,24 @@ async def build_rates_msg() -> str:
     )
     now = datetime.now(KYIV_TZ).strftime("%H:%M")
     lines = [f"💱 *Курс валют* _{now}_\n"]
-    # Шапка таблицы: Моно и obmen24
-    lines.append("`Валюта   Моно    obmen24`")
 
-    for cur, flag in [("USD","🇺🇸"), ("EUR","🇪🇺")]:
+    def v(d, key, fallback="  — "):
+        val = d.get(key)
+        return f"{float(val):.2f}" if val else fallback
+
+    for cur, flag in [("USD", "🇺🇸"), ("EUR", "🇪🇺")]:
         mono_d = mono.get(cur, {})
-        ob_d = obmen.get(cur, {})
-        mono_buy  = f"{mono_d['rateBuy']:.2f}"  if mono_d.get("rateBuy")  else "  —  "
-        mono_sell = f"{mono_d['rateSell']:.2f}" if mono_d.get("rateSell") else "  —  "
-        ob_buy    = f"{ob_d['buy']:.2f}"        if ob_d.get("buy")        else "  —  "
-        ob_sell   = f"{ob_d['sale']:.2f}"       if ob_d.get("sale")       else "  —  "
-        lines.append(f"`{flag}{cur}  Купить  {mono_buy:>6}  {ob_buy:>6}`")
-        lines.append(f"`     Продать {mono_sell:>6}  {ob_sell:>6}`")
+        ob_d   = obmen.get(cur, {})
+        mb  = v(mono_d, "rateBuy");  ms  = v(mono_d, "rateSell")
+        ob  = v(ob_d,   "buy");      os_ = v(ob_d,   "sale")
+        lines.append(
+            f"{flag} *{cur}*\n"
+            f"`{'':1}{'':7}{'Моно':>7}  {'obmen24':>7}`\n"
+            f"`{'':1}{'Купить':<7}{mb:>7}  {ob:>7}`\n"
+            f"`{'':1}{'Продать':<7}{ms:>7}  {os_:>7}`"
+        )
 
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 # ── КОНТЕКСТ РАЗГОВОРА ───────────────────────────────────────────────────────
 # Хранит последний контекст: имя человека, последнее действие
@@ -1299,6 +1320,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚙️ *Прочее*:", parse_mode="Markdown", reply_markup=OTHER_KB); return
     if text == "🎯 Цели":
         await cmd_goals(update, context); return
+
+    # Быстрый fallback для добавления категории (без LLM)
+    import re as _re
+    _cat_m = _re.match(
+        r"(?:добав[ьи]|add|create)\s+(?:категор\w*\s+)?(?:трат\w*\s+)?(\w[\w\s-]{1,29})",
+        text.strip(), _re.IGNORECASE
+    )
+    if _cat_m:
+        cat_name = _cat_m.group(1).strip().capitalize()
+        if cat_name and cat_name.lower() not in [c.lower() for c in get_all_categories()]:
+            save_user_category(cat_name)
+            em = get_category_emoji(cat_name)
+            await update.message.reply_text(
+                f"✅ Категория {em} *{cat_name}* добавлена!\nТеперь пиши: «{cat_name} 1500»",
+                parse_mode="Markdown"
+            )
+            return
 
     # Всё остальное — роутер ИИ обрабатывает сам
     await process(update, context, text)
