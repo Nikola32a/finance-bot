@@ -487,6 +487,7 @@ async def fetch_monobank_rates() -> dict:
 
 
 import httpx
+import re
 from datetime import datetime
 
 _obmen_cache = {}
@@ -494,6 +495,7 @@ _obmen_ts = 0
 
 
 async def fetch_obmen_rates():
+    """Курс обменников с obmen24 HTML (Львов)"""
     global _obmen_cache, _obmen_ts
 
     now_ts = datetime.now(KYIV_TZ).timestamp()
@@ -502,76 +504,125 @@ async def fetch_obmen_rates():
     if _obmen_cache and now_ts - _obmen_ts < 600:
         return _obmen_cache
 
-    # --- 1. Пытаемся получить с obmen24 ---
+    SEARCH_KEYS = {
+        "USD": ["USD", "Долар", "Dollar", "$"],
+        "EUR": ["EUR", "Євро", "Euro", "€"],
+    }
+
+    num_pat = re.compile(r"(\d{2,3}[.,]\d{1,4})")
+
+    def _extract_two_rates(chunk: str):
+        """
+        Из куска HTML вытаскивает 2 ближайших валидных числа (курс покупки/продажи)
+        """
+        nums = []
+        for n in num_pat.findall(chunk):
+            try:
+                val = float(n.replace(",", "."))
+                if 30 < val < 200:
+                    nums.append(val)
+            except:
+                continue
+
+        # Убираем подряд идущие дубликаты
+        cleaned = []
+        for x in nums:
+            if not cleaned or abs(cleaned[-1] - x) > 0.001:
+                cleaned.append(x)
+
+        if len(cleaned) >= 2:
+            return {"buy": cleaned[0], "sale": cleaned[1]}
+
+        return None
+
+    def _parse_rates_from_html(html: str) -> dict:
+        result = {}
+
+        # Нормализуем пробелы
+        compact_html = re.sub(r"\s+", " ", html)
+
+        for cur, keys in SEARCH_KEYS.items():
+            found = False
+
+            for key in keys:
+                # Ищем ВСЕ вхождения, а не первое
+                for match in re.finditer(re.escape(key), compact_html, flags=re.IGNORECASE):
+                    idx = match.start()
+
+                    # Берём небольшой блок после ключа
+                    chunk = compact_html[idx: idx + 500]
+
+                    parsed = _extract_two_rates(chunk)
+                    if parsed:
+                        result[cur] = parsed
+                        found = True
+                        break
+
+                if found:
+                    break
+
+        return result
+
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
             resp = await client.get(
-                "https://obmen24.com.ua/api/quotes?city=lviv",
+                "https://obmen24.com.ua/uk/lviv",
                 headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Accept": "application/json"
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.8",
+                    "Referer": "https://obmen24.com.ua/",
                 }
             )
 
-            # ВАЖНО: проверка HTTP-статуса
             resp.raise_for_status()
+            html = resp.text
 
-            # Можно дополнительно проверить content-type
-            content_type = resp.headers.get("content-type", "")
-            if "application/json" not in content_type.lower():
-                raise ValueError(f"Unexpected content-type: {content_type}")
+        result = _parse_rates_from_html(html)
 
-            data = resp.json()
-
-        result = {}
-
-        for item in data:
-            cur = item.get("currency")
-            if cur in ("USD", "EUR"):
-                result[cur] = {
-                    "buy": float(item.get("buy", 0) or 0),
-                    "sale": float(item.get("sale", 0) or 0),
-                }
-
-        if result:
+        # Проверяем, что есть обе валюты
+        if result and ("USD" in result or "EUR" in result):
             _obmen_cache = result
             _obmen_ts = now_ts
-            logger.info(f"obmen24 API parsed: {result}")
+            logger.info(f"obmen24 parsed HTML: {result}")
             return result
 
-        raise ValueError("obmen24 returned empty or invalid data")
+        raise ValueError("obmen24 parse empty or invalid")
 
     except Exception as e:
-        logger.error(f"obmen24 API error: {e}")
+        logger.warning(f"obmen24 HTML parse error: {e}")
 
-    # --- 2. fallback на Приват ---
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.get(
-                "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5"
-            )
-            resp.raise_for_status()
+        # fallback на Приват
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                resp = await client.get(
+                    "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5"
+                )
+                resp.raise_for_status()
+                data = resp.json()
 
-            data = resp.json()
+            result = {}
+            for item in data:
+                ccy = item.get("ccy", "")
+                if ccy in ("USD", "EUR"):
+                    result[ccy] = {
+                        "buy": float(item.get("buy", 0) or 0),
+                        "sale": float(item.get("sale", 0) or 0),
+                    }
 
-        result = {}
-        for item in data:
-            ccy = item.get("ccy", "")
-            if ccy in ("USD", "EUR"):
-                result[ccy] = {
-                    "buy": float(item.get("buy", 0) or 0),
-                    "sale": float(item.get("sale", 0) or 0),
-                }
+            if result:
+                logger.info(f"PrivatBank fallback parsed: {result}")
+                return result
 
-        if result:
-            logger.info(f"PrivatBank fallback parsed: {result}")
-            return result
+            raise ValueError("PrivatBank returned empty data")
 
-        raise ValueError("PrivatBank returned empty data")
-
-    except Exception as e:
-        logger.error(f"PrivatBank fallback error: {e}")
-        return {}
+        except Exception as e:
+            logger.error(f"PrivatBank fallback error: {e}")
+            return {}
 async def build_rates_msg() -> str:
     nbu, mono, obmen = await asyncio.gather(
         fetch_nbu_rates(), fetch_monobank_rates(), fetch_obmen_rates()
