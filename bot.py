@@ -486,63 +486,66 @@ async def fetch_monobank_rates() -> dict:
         return {}
 
 async def fetch_obmen_rates() -> dict:
-    """Курс обменників з obmen24.com.ua/uk/lviv"""
-    global _obmen_cache, _obmen_ts
-    now_ts = datetime.now(KYIV_TZ).timestamp()
-    if _obmen_cache and now_ts - _obmen_ts < 600:
-        return _obmen_cache
-    import re as _re
-    # Ключові слова для пошуку валюти в HTML (обмінник може писати EUR як € або Euro)
-    SEARCH_KEYS = {
-        "USD": ["USD", "Долар", "Dollar", "$"],
-        "EUR": ["EUR", "Євро", "Euro", "€", "EUR/UAH"],
-    }
-    def _parse_rates_from_html(html: str) -> dict:
-        result = {}
-        # Всі числа що схожі на курс гривні (30..200)
-        num_pat = _re.compile(r"(\d{2,3}[.,]\d{1,4})")
-        for cur, keys in SEARCH_KEYS.items():
-            for key in keys:
-                idx = html.find(key)
-                if idx < 0:
-                    continue
-                # Беремо 600 символів після знаходження
-                chunk = html[idx:idx + 600]
-                nums = [float(n.replace(",", ".")) for n in num_pat.findall(chunk)
-                        if 30 < float(n.replace(",", ".")) < 200]
-                if len(nums) >= 2:
-                    result[cur] = {"buy": nums[0], "sale": nums[1]}
-                    break
+   """Курс обменників через API obmen24"""
+global _obmen_cache, _obmen_ts
+now_ts = datetime.now(KYIV_TZ).timestamp()
+
+if _obmen_cache and now_ts - _obmen_ts < 600:
+    return _obmen_cache
+
+try:
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            "https://obmen24.com.ua/api/quotes?city=lviv",
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json"
+            }
+        )
+        data = resp.json()
+
+    result = {}
+
+    for item in data:
+        cur = item.get("currency")
+        if cur in ("USD", "EUR"):
+            result[cur] = {
+                "buy": float(item.get("buy", 0)),
+                "sale": float(item.get("sale", 0)),
+            }
+
+    if result:
+        _obmen_cache = result
+        _obmen_ts = now_ts
+        logger.info(f"obmen24 API parsed: {result}")
         return result
 
+    raise ValueError("empty API response")
+
+except Exception as e:
+    logger.error(f"obmen24 API error: {e}")
+
+    # fallback на Приват
     try:
-        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=8) as client:
             resp = await client.get(
-                "https://obmen24.com.ua/uk/lviv",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0"}
+                "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5"
             )
-            html = resp.text
-        result = _parse_rates_from_html(html)
-        if result:
-            _obmen_cache = result
-            _obmen_ts = now_ts
-            logger.info(f"obmen24 parsed: {result}")
-            return result
-        raise ValueError("obmen24 parse empty")
-    except Exception as e:
-        logger.error(f"obmen24 rates: {e}")
-        try:
-            async with httpx.AsyncClient(timeout=8) as client:
-                resp = await client.get("https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5")
-                data = resp.json()
-                result = {}
-                for item in data:
-                    ccy = item.get("ccy","")
-                    if ccy in ("USD","EUR"):
-                        result[ccy] = {"buy": float(item.get("buy",0)), "sale": float(item.get("sale",0))}
-                return result
-        except:
-            return {}
+            data = resp.json()
+
+        result = {}
+        for item in data:
+            ccy = item.get("ccy", "")
+            if ccy in ("USD", "EUR"):
+                result[ccy] = {
+                    "buy": float(item.get("buy", 0)),
+                    "sale": float(item.get("sale", 0)),
+                }
+
+        return result
+
+    except:
+        return {}
 
 async def build_rates_msg() -> str:
     nbu, mono, obmen = await asyncio.gather(
@@ -562,7 +565,7 @@ async def build_rates_msg() -> str:
         ob  = v(ob_d,   "buy");      os_ = v(ob_d,   "sale")
         lines.append(
             f"{flag} *{cur}*\n"
-            f"`{'':1}{'':7}{'Моно':>6}  {'obmen24':>7}`\n"
+            f"`{'':1}{'':7}{'Моно':>6}  {'obmen24':>9}`\n"
             f"`{'':1}{'Купить':<7}{mb:>7}  {ob:>7}`\n"
             f"`{'':1}{'Продать':<7}{ms:>7}  {os_:>7}`"
         )
