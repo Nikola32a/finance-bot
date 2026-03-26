@@ -487,7 +487,7 @@ async def fetch_monobank_rates() -> dict:
 
 async def fetch_obmen_rates() -> dict:
    """Курс обменників через API obmen24"""
-global _obmen_cache, _obmen_ts
+global _obmen_cache = None, _obmen_ts = 0
 now_ts = datetime.now(KYIV_TZ).timestamp()
 
 if _obmen_cache and now_ts - _obmen_ts < 600:
