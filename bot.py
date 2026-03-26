@@ -213,7 +213,7 @@ def get_current_month_records() -> list:
     return records_for_month(now.month, now.year)
 
 def get_week_records() -> list:
-    week_ago = datetime.now(KYIV_TZ) - timedelta(days=7)
+    week_ago = datetime.now(KYIV_TZ).replace(tzinfo=None) - timedelta(days=7)
     result = []
     for r in get_all_records():
         try:
@@ -478,29 +478,54 @@ async def fetch_monobank_rates() -> dict:
         return {}
 
 async def fetch_obmen_rates() -> dict:
-    """Курс обменников с obmen.ua (агрегатор)"""
+    """Курс обменников с obmen24.com.ua/uk/lviv"""
     global _obmen_cache, _obmen_ts
     now = datetime.now(KYIV_TZ).timestamp()
     if _obmen_cache and now - _obmen_ts < 600:
         return _obmen_cache
     try:
-        async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
-            resp = await client.get("https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5")
-            data = resp.json()
-            result = {}
-            for item in data:
-                ccy = item.get("ccy","")
-                if ccy in ("USD","EUR"):
-                    result[ccy] = {
-                        "buy": float(item.get("buy", 0)),
-                        "sale": float(item.get("sale", 0)),
-                    }
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(
+                "https://obmen24.com.ua/uk/lviv",
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            )
+            html = resp.text
+        result = {}
+        import re as _re
+        # Ищем строки таблицы с курсами — обычно формат: USD ... buy ... sell
+        for cur in ("USD", "EUR"):
+            # Паттерн: ищем валюту и ближайшие числа вида 43.xx / 44.xx
+            pattern = _re.compile(
+                rf'{cur}.*?(\d{{2,3}}[.,]\d{{1,4}}).*?(\d{{2,3}}[.,]\d{{1,4}})',
+                _re.DOTALL | _re.IGNORECASE
+            )
+            m = pattern.search(html)
+            if m:
+                buy = float(m.group(1).replace(",", "."))
+                sell = float(m.group(2).replace(",", "."))
+                # Санитарная проверка — разумные курсы UAH
+                if 30 < buy < 200 and 30 < sell < 200:
+                    result[cur] = {"buy": buy, "sale": sell}
+        if result:
             _obmen_cache = result
             _obmen_ts = now
             return result
+        # Fallback: Приватбанк если парсинг не дал результат
+        raise ValueError("obmen24 parse empty")
     except Exception as e:
-        logger.error(f"obmen rates (privat): {e}")
-        return {}
+        logger.error(f"obmen24 rates: {e}")
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                resp = await client.get("https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5")
+                data = resp.json()
+                result = {}
+                for item in data:
+                    ccy = item.get("ccy","")
+                    if ccy in ("USD","EUR"):
+                        result[ccy] = {"buy": float(item.get("buy",0)), "sale": float(item.get("sale",0))}
+                return result
+        except:
+            return {}
 
 async def build_rates_msg() -> str:
     nbu, mono, obmen = await asyncio.gather(
@@ -508,26 +533,19 @@ async def build_rates_msg() -> str:
     )
     now = datetime.now(KYIV_TZ).strftime("%H:%M")
     lines = [f"💱 *Курс валют* _{now}_\n"]
-    lines.append("`         НБУ    Моно   Приват`")
+    # Шапка таблицы: Моно и obmen24
+    lines.append("`Валюта   Моно    obmen24`")
 
     for cur, flag in [("USD","🇺🇸"), ("EUR","🇪🇺")]:
-        nbu_rate = nbu.get(cur, 0)
         mono_d = mono.get(cur, {})
         ob_d = obmen.get(cur, {})
-        nbu_s = f"{nbu_rate:.2f}" if nbu_rate else "—"
-        mono_buy = f"{mono_d['rateBuy']:.2f}" if mono_d.get("rateBuy") else "—"
-        mono_sell = f"{mono_d['rateSell']:.2f}" if mono_d.get("rateSell") else "—"
-        priv_buy = f"{ob_d['buy']:.2f}" if ob_d.get("buy") else "—"
-        priv_sell = f"{ob_d['sale']:.2f}" if ob_d.get("sale") else "—"
-        mono_s = f"{mono_buy}/{mono_sell}" if mono_d else "—"
-        priv_s = f"{priv_buy}/{priv_sell}" if ob_d else "—"
-        lines.append(f"\n{flag} *{cur}*")
-        lines.append(f"`{'Купить':<7} {mono_buy:>6} {priv_buy:>7}`")
-        lines.append(f"`{'Продать':<7} {mono_sell:>6} {priv_sell:>7}`")
-        lines.append(f"`{'НБУ':<7} {nbu_s:>6}`")
+        mono_buy  = f"{mono_d['rateBuy']:.2f}"  if mono_d.get("rateBuy")  else "  —  "
+        mono_sell = f"{mono_d['rateSell']:.2f}" if mono_d.get("rateSell") else "  —  "
+        ob_buy    = f"{ob_d['buy']:.2f}"        if ob_d.get("buy")        else "  —  "
+        ob_sell   = f"{ob_d['sale']:.2f}"       if ob_d.get("sale")       else "  —  "
+        lines.append(f"`{flag}{cur}  Купить  {mono_buy:>6}  {ob_buy:>6}`")
+        lines.append(f"`     Продать {mono_sell:>6}  {ob_sell:>6}`")
 
-    gbp = nbu.get("GBP", 0)
-    if gbp: lines.append(f"\n🇬🇧 *GBP* — НБУ: *{gbp:.2f} ₴*")
     return "\n".join(lines)
 
 # ── КОНТЕКСТ РАЗГОВОРА ───────────────────────────────────────────────────────
@@ -610,7 +628,7 @@ def build_debts_msg() -> str:
     lines = ["💸 *Активные долги:*\n"]
     totals: dict = defaultdict(float)
     for d in debts.values():
-        days_ago = (datetime.now(KYIV_TZ) - datetime.strptime(d["date"], "%d.%m.%Y")).days
+        days_ago = (datetime.now(KYIV_TZ) - datetime.strptime(d["date"], "%d.%m.%Y").replace(tzinfo=KYIV_TZ)).days
         note = f" — _{d['note']}_" if d.get("note") else ""
         ams = d.get("amounts",[{"amount":d.get("amount",0),"currency":"UAH"}])
         lines.append(f"👤 *{d['name']}* — {format_amounts(ams)}{note}")
