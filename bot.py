@@ -486,14 +486,23 @@ async def fetch_monobank_rates() -> dict:
         return {}
 
 
+import httpx
+from datetime import datetime
+
+_obmen_cache = {}
+_obmen_ts = 0
+
+
 async def fetch_obmen_rates():
     global _obmen_cache, _obmen_ts
 
     now_ts = datetime.now(KYIV_TZ).timestamp()
 
+    # Кэш на 10 минут
     if _obmen_cache and now_ts - _obmen_ts < 600:
         return _obmen_cache
 
+    # --- 1. Пытаемся получить с obmen24 ---
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
@@ -503,6 +512,15 @@ async def fetch_obmen_rates():
                     "Accept": "application/json"
                 }
             )
+
+            # ВАЖНО: проверка HTTP-статуса
+            resp.raise_for_status()
+
+            # Можно дополнительно проверить content-type
+            content_type = resp.headers.get("content-type", "")
+            if "application/json" not in content_type.lower():
+                raise ValueError(f"Unexpected content-type: {content_type}")
+
             data = resp.json()
 
         result = {}
@@ -511,8 +529,8 @@ async def fetch_obmen_rates():
             cur = item.get("currency")
             if cur in ("USD", "EUR"):
                 result[cur] = {
-                    "buy": float(item.get("buy", 0)),
-                    "sale": float(item.get("sale", 0)),
+                    "buy": float(item.get("buy", 0) or 0),
+                    "sale": float(item.get("sale", 0) or 0),
                 }
 
         if result:
@@ -521,33 +539,39 @@ async def fetch_obmen_rates():
             logger.info(f"obmen24 API parsed: {result}")
             return result
 
-        raise ValueError("empty API response")
+        raise ValueError("obmen24 returned empty or invalid data")
 
     except Exception as e:
         logger.error(f"obmen24 API error: {e}")
 
-        # fallback на Приват
-        try:
-            async with httpx.AsyncClient(timeout=8) as client:
-                resp = await client.get(
-                    "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5"
-                )
-                data = resp.json()
+    # --- 2. fallback на Приват ---
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(
+                "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5"
+            )
+            resp.raise_for_status()
 
-            result = {}
-            for item in data:
-                ccy = item.get("ccy", "")
-                if ccy in ("USD", "EUR"):
-                    result[ccy] = {
-                        "buy": float(item.get("buy", 0)),
-                        "sale": float(item.get("sale", 0)),
-                    }
+            data = resp.json()
 
+        result = {}
+        for item in data:
+            ccy = item.get("ccy", "")
+            if ccy in ("USD", "EUR"):
+                result[ccy] = {
+                    "buy": float(item.get("buy", 0) or 0),
+                    "sale": float(item.get("sale", 0) or 0),
+                }
+
+        if result:
+            logger.info(f"PrivatBank fallback parsed: {result}")
             return result
 
-        except:
-            return {}
+        raise ValueError("PrivatBank returned empty data")
 
+    except Exception as e:
+        logger.error(f"PrivatBank fallback error: {e}")
+        return {}
 async def build_rates_msg() -> str:
     nbu, mono, obmen = await asyncio.gather(
         fetch_nbu_rates(), fetch_monobank_rates(), fetch_obmen_rates()
