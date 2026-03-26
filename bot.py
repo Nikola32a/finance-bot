@@ -437,7 +437,7 @@ _rates_cache: dict = {}
 _rates_ts: float = 0
 _mono_cache: dict = {}
 _mono_ts: float = 0
-_obmen_cache: dict = None
+_obmen_cache: dict = {}
 _obmen_ts: float = 0
 
 async def fetch_nbu_rates() -> dict:
@@ -485,8 +485,6 @@ async def fetch_monobank_rates() -> dict:
         logger.error(f"monobank rates: {e}")
         return {}
 
-_obmen_cache = None
-_obmen_ts = 0
 
 async def fetch_obmen_rates():
     global _obmen_cache, _obmen_ts
