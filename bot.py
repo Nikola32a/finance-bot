@@ -1,6 +1,5 @@
 """
-Финансовый AI-агент Telegram бот v4.1
-Умный парсер: ИИ понимает любой контекст, сумму и категорию без шаблонов
+Финансовый AI-агент Telegram бот v5.1
 """
 import os, logging, tempfile, json, re, asyncio
 from datetime import datetime, timedelta, time as dtime
@@ -87,7 +86,6 @@ def _worksheet_get_or_create(sp, name):
     try: return sp.worksheet(name)
     except: return sp.add_worksheet(title=name, rows=200, cols=10)
 
-def _invalidate(name="sheet1"):
     _records_cache.pop(name, None)
 
 def _cached_records(name="sheet1") -> list:
@@ -109,26 +107,18 @@ _settings: dict = {}
 
 def _settings_sheet():
     sh = _get_worksheet("Настройки")
-    vals = sh.get_all_values()
-    # Создаём заголовки если лист пуст ИЛИ заголовки не те
-    if not vals or vals[0] != ["Ключ", "Значение"]:
-        sh.clear()
+    if not sh.get_all_values():
         sh.insert_row(["Ключ", "Значение"], 1)
     return sh
 
 def load_settings():
-    import time as _time
-    for attempt in range(3):
-        try:
-            data = {r["Ключ"]: str(r["Значение"]) for r in _settings_sheet().get_all_records()
-                    if r.get("Ключ") and str(r.get("Значение","")) != ""}
-            _settings.update(data)
-            logger.info(f"Настройки загружены: {list(data.keys())}")
-            return
-        except Exception as e:
-            logger.error(f"load_settings attempt {attempt+1}: {e}")
-            if attempt < 2:
-                _time.sleep(2)
+    try:
+        data = {r["Ключ"]: str(r["Значение"]) for r in _settings_sheet().get_all_records()
+                if r.get("Ключ") and str(r.get("Значение","")) != ""}
+        _settings.update(data)
+        logger.info(f"Настройки загружены: {list(data.keys())}")
+    except Exception as e:
+        logger.error(f"load_settings: {e}")
 
 def save_setting(key: str, value: str):
     _settings[key] = value
@@ -221,7 +211,7 @@ def get_current_month_records() -> list:
     return records_for_month(now.month, now.year)
 
 def get_week_records() -> list:
-    week_ago = datetime.now(KYIV_TZ).replace(tzinfo=None) - timedelta(days=7)
+    week_ago = datetime.now(KYIV_TZ) - timedelta(days=7)
     result = []
     for r in get_all_records():
         try:
@@ -486,63 +476,29 @@ async def fetch_monobank_rates() -> dict:
         return {}
 
 async def fetch_obmen_rates() -> dict:
-    """Курс обменників з obmen24.com.ua/uk/lviv"""
+    """Курс обменников с obmen.ua (агрегатор)"""
     global _obmen_cache, _obmen_ts
-    now_ts = datetime.now(KYIV_TZ).timestamp()
-    if _obmen_cache and now_ts - _obmen_ts < 600:
+    now = datetime.now(KYIV_TZ).timestamp()
+    if _obmen_cache and now - _obmen_ts < 600:
         return _obmen_cache
-    import re as _re
-    # Ключові слова для пошуку валюти в HTML (обмінник може писати EUR як € або Euro)
-    SEARCH_KEYS = {
-        "USD": ["USD", "Долар", "Dollar", "$"],
-        "EUR": ["EUR", "Євро", "Euro", "€"],
-    }
-    def _parse_rates_from_html(html: str) -> dict:
-        result = {}
-        # Всі числа що схожі на курс гривні (30..200)
-        num_pat = _re.compile(r"(\d{2,3}[.,]\d{1,4})")
-        for cur, keys in SEARCH_KEYS.items():
-            for key in keys:
-                idx = html.find(key)
-                if idx < 0:
-                    continue
-                # Беремо 600 символів після знаходження
-                chunk = html[idx:idx + 600]
-                nums = [float(n.replace(",", ".")) for n in num_pat.findall(chunk)
-                        if 30 < float(n.replace(",", ".")) < 200]
-                if len(nums) >= 2:
-                    result[cur] = {"buy": nums[0], "sale": nums[1]}
-                    break
-        return result
-
     try:
-        async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
-            resp = await client.get(
-                "https://obmen24.com.ua/uk/lviv",
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0"}
-            )
-            html = resp.text
-        result = _parse_rates_from_html(html)
-        if result:
+        async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+            resp = await client.get("https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5")
+            data = resp.json()
+            result = {}
+            for item in data:
+                ccy = item.get("ccy","")
+                if ccy in ("USD","EUR"):
+                    result[ccy] = {
+                        "buy": float(item.get("buy", 0)),
+                        "sale": float(item.get("sale", 0)),
+                    }
             _obmen_cache = result
-            _obmen_ts = now_ts
-            logger.info(f"obmen24 parsed: {result}")
+            _obmen_ts = now
             return result
-        raise ValueError("obmen24 parse empty")
     except Exception as e:
-        logger.error(f"obmen24 rates: {e}")
-        try:
-            async with httpx.AsyncClient(timeout=8) as client:
-                resp = await client.get("https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5")
-                data = resp.json()
-                result = {}
-                for item in data:
-                    ccy = item.get("ccy","")
-                    if ccy in ("USD","EUR"):
-                        result[ccy] = {"buy": float(item.get("buy",0)), "sale": float(item.get("sale",0))}
-                return result
-        except:
-            return {}
+        logger.error(f"obmen rates (privat): {e}")
+        return {}
 
 async def build_rates_msg() -> str:
     nbu, mono, obmen = await asyncio.gather(
@@ -551,23 +507,21 @@ async def build_rates_msg() -> str:
     now = datetime.now(KYIV_TZ).strftime("%H:%M")
     lines = [f"💱 *Курс валют* _{now}_\n"]
 
-    def v(d, key, fallback="  — "):
-        val = d.get(key)
-        return f"{float(val):.2f}" if val else fallback
-
-    for cur, flag in [("USD", "🇺🇸"), ("EUR", "🇪🇺")]:
+    for cur, flag in [("USD","🇺🇸"), ("EUR","🇪🇺")]:
+        lines.append(f"{flag} *{cur}*")
+        nbu_rate = nbu.get(cur, 0)
+        if nbu_rate: lines.append(f"  🏛 НБУ: *{nbu_rate:.2f} ₴*")
         mono_d = mono.get(cur, {})
-        ob_d   = obmen.get(cur, {})
-        mb  = v(mono_d, "rateBuy");  ms  = v(mono_d, "rateSell")
-        ob  = v(ob_d,   "buy");      os_ = v(ob_d,   "sale")
-        lines.append(
-            f"{flag} *{cur}*\n"
-            f"`{'':1}{'':7}{'Моно':>7}  {'obmen24':>7}`\n"
-            f"`{'':1}{'Купить':<7}{mb:>7}  {ob:>7}`\n"
-            f"`{'':1}{'Продать':<7}{ms:>7}  {os_:>7}`"
-        )
+        if mono_d.get("rateBuy") and mono_d.get("rateSell"):
+            lines.append(f"  🟢 Моно: купить *{mono_d['rateBuy']:.2f}* · продать *{mono_d['rateSell']:.2f}*")
+        ob_d = obmen.get(cur, {})
+        if ob_d.get("buy") and ob_d.get("sale"):
+            lines.append(f"  🔵 Приват: купить *{ob_d['buy']:.2f}* · продать *{ob_d['sale']:.2f}*")
+        lines.append("")
 
-    return "\n\n".join(lines)
+    gbp = nbu.get("GBP", 0)
+    if gbp: lines.append(f"🇬🇧 *GBP* — НБУ: *{gbp:.2f} ₴*")
+    return "\n".join(lines)
 
 # ── КОНТЕКСТ РАЗГОВОРА ───────────────────────────────────────────────────────
 # Хранит последний контекст: имя человека, последнее действие
@@ -649,7 +603,7 @@ def build_debts_msg() -> str:
     lines = ["💸 *Активные долги:*\n"]
     totals: dict = defaultdict(float)
     for d in debts.values():
-        days_ago = (datetime.now(KYIV_TZ) - datetime.strptime(d["date"], "%d.%m.%Y").replace(tzinfo=KYIV_TZ)).days
+        days_ago = (datetime.now(KYIV_TZ) - datetime.strptime(d["date"], "%d.%m.%Y")).days
         note = f" — _{d['note']}_" if d.get("note") else ""
         ams = d.get("amounts",[{"amount":d.get("amount",0),"currency":"UAH"}])
         lines.append(f"👤 *{d['name']}* — {format_amounts(ams)}{note}")
@@ -669,14 +623,9 @@ def transcribe(path: str) -> str:
         return groq_client.audio.transcriptions.create(
             model="whisper-large-v3", file=f, language="ru").text
 
-# Маленькая быстрая модель для роутинга (~200 токенов/запрос)
-ROUTER_MODEL = "llama-3.1-8b-instant"
-# Большая умная модель только для ответов/советов (~600 токенов/запрос)
-CHAT_MODEL   = "llama-3.3-70b-versatile"
-
-def _llm(messages: list, max_tokens=300, temperature=0.0, model=None) -> str:
+def _llm(messages: list, max_tokens=600, temperature=0.0) -> str:
     r = groq_client.chat.completions.create(
-        model=model or ROUTER_MODEL,
+        model="llama-3.3-70b-versatile",
         messages=messages,
         max_tokens=max_tokens,
         temperature=temperature,
@@ -684,7 +633,7 @@ def _llm(messages: list, max_tokens=300, temperature=0.0, model=None) -> str:
     return r.choices[0].message.content.strip()
 
 def groq_chat(messages: list, max_tokens=800) -> str:
-    return _llm(messages, max_tokens=max_tokens, temperature=0.7, model=CHAT_MODEL)
+    return _llm(messages, max_tokens=max_tokens, temperature=0.7)
 
 def _extract_json(raw: str, bracket="[") -> str:
     close = "]" if bracket == "[" else "}"
@@ -1092,13 +1041,6 @@ async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
         text=f"⏰ *Напоминание о долге*\n\n👤 *{d['name']}* должен {format_amounts(ams)}",
         parse_mode="Markdown", reply_markup=kb)
 
-async def _send_periodic_reminder(context: ContextTypes.DEFAULT_TYPE):
-    data = context.job.data or {}
-    cid = data.get("chat_id") or CHAT_ID
-    text = data.get("text", "Напоминание")
-    if not cid: return
-    await context.bot.send_message(chat_id=cid, text="⏰ *Напоминание*\n\n_" + text + "_", parse_mode="Markdown")
-
 async def send_weekly_insight(context: ContextTypes.DEFAULT_TYPE):
     """Еженедельный инсайт по пятницам в 19:00"""
     cid = (context.job.data or {}).get("chat_id") or CHAT_ID
@@ -1326,9 +1268,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🎯 Цели":
         await cmd_goals(update, context); return
 
-    import re as _re
     # Быстрый fallback: удалить последнюю трату (без LLM)
-    if _re.search(r"(удал|убер|скасу|відмін|cancel|undo).*(останн|последн|last|запис|трат|витрат)", text, _re.IGNORECASE) or        _re.match(r"(удал|убер|скасу|відмін)[иьує]?\s*$", text.strip(), _re.IGNORECASE):
+    if re.search(r"(удал|убер|скасу|відмін|cancel|undo).*(останн|последн|last|запис|трат|витрат)", text, re.IGNORECASE) or \
+       re.match(r"(удал|убер|скасу|відмін)[иьує]?\s*$", text.strip(), re.IGNORECASE):
         try:
             all_recs = get_all_records()
             sh = get_sheet()
@@ -1341,16 +1283,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cat = last.get("Категория","?")
                 await update.message.reply_text(
                     f"🗑 *Удалено*\n{get_category_emoji(cat)} *{last.get('Описание','?')}* — *{fmt(float(last.get(sk,0)))} ₴*",
-                    parse_mode="Markdown"
-                )
-                return
+                    parse_mode="Markdown"); return
         except Exception as e:
             logger.error(f"undo fallback: {e}")
 
     # Быстрый fallback: добавить категорию (без LLM)
-    _cat_m = _re.match(
-        r"(?:добав[ьи]|add|create)\s+(?:категор\w*\s+)?(?:трат\w*\s+)?(\w[\w\s-]{1,29})",
-        text.strip(), _re.IGNORECASE
+    _cat_m = re.match(
+        r"(?:добав[ьи]|add|нова\s+категор\w*|новая\s+категор\w*)\s+(?:категор\w*\s+)?(\w[\w\s-]{1,29})",
+        text.strip(), re.IGNORECASE
     )
     if _cat_m:
         cat_name = _cat_m.group(1).strip().capitalize()
@@ -1359,37 +1299,129 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             em = get_category_emoji(cat_name)
             await update.message.reply_text(
                 f"✅ Категория {em} *{cat_name}* добавлена!\nТеперь пиши: «{cat_name} 1500»",
-                parse_mode="Markdown"
-            )
-            return
+                parse_mode="Markdown"); return
 
     # Всё остальное — роутер ИИ обрабатывает сам
     await process(update, context, text)
 
+def _regex_route(text: str) -> list | None:
+    """Быстрый роутер без LLM для ~80% простых команд"""
+    t = text.strip()
+
+    # Зарплата: "зарплата 6го 25000", "зарплата 25000 6 числа", "зарплата 6-го 25 000"
+    m = re.search(
+        r"зарплат[аы]?\s+(\d{1,2})[-\s]?(?:го|числа|ого)?\s+(\d[\d\s.,]*(?:\s*к)?)"
+        r"|зарплат[аы]?\s+(\d[\d\s.,]*(?:\s*к)?)\s+(\d{1,2})[-\s]?(?:го|числа)",
+        t, re.IGNORECASE
+    )
+    if m:
+        g = [x for x in m.groups() if x]
+        try:
+            # Определяем что число а что день
+            candidates = []
+            for x in g:
+                x_clean = x.strip().replace(" ", "").replace(",", ".")
+                mult = 1000 if x_clean.lower().endswith("к") else 1
+                x_clean = re.sub(r"[кК]$", "", x_clean)
+                candidates.append(float(x_clean) * mult)
+            day = int(candidates[0]) if candidates[0] <= 31 else int(candidates[1])
+            amt = candidates[1] if candidates[0] <= 31 else candidates[0]
+            if 1 <= day <= 31 and amt > 0:
+                return [{"action": "salary_set", "day": day, "amount": amt}]
+        except: pass
+
+    # Бюджет: "бюджет 25000", "бюджет на месяц 25к", "бюджет 25 000"
+    m = re.search(r"бюджет[^\d]*(\d[\d\s]*(?:[.,]\d+)?(?:\s*к)?)", t, re.IGNORECASE)
+    if m:
+        s = m.group(1).strip().replace(" ", "").replace(",", ".")
+        mult = 1000 if s.lower().endswith("к") else 1
+        s = re.sub(r"[кК]$", "", s)
+        try:
+            return [{"action": "budget_set", "amount": float(s) * mult}]
+        except: pass
+
+    # Трата: "кофе 85", "обед 650 грн", "3к бензин"
+    m = re.match(
+        r"^([а-яёіїєa-zA-Zа-яёіїє][а-яёіїєa-zA-Zа-яёіїє\w\s/-]{0,40}?)\s+"
+        r"(\d[\d\s]*(?:[.,]\d+)?(?:\s*к(?:р|ривень|уб)?|\s*тис(?:яч)?)?)\s*(?:₴|грн|грн\.?|uah)?$",
+        t, re.IGNORECASE
+    ) or re.match(
+        r"^(\d[\d\s]*(?:[.,]\d+)?(?:\s*к(?:р|ривень|уб)?|\s*тис(?:яч)?)?)\s*(?:₴|грн|uah)?\s+"
+        r"([а-яёіїєa-zA-Zа-яёіїє][а-яёіїєa-zA-Zа-яёіїє\w\s/-]{1,40})$",
+        t, re.IGNORECASE
+    )
+    if m:
+        g = m.groups()
+        def parse_amount(s):
+            s = s.strip().replace(" ", "").replace(",", ".")
+            mult = 1000 if re.search(r"к(?:р|ривень|уб)?$|тис", s, re.IGNORECASE) else 1
+            s = re.sub(r"[кКтТис]+.*$", "", s, flags=re.IGNORECASE)
+            try: return float(s) * mult
+            except: return None
+
+        amt = parse_amount(g[1]) or parse_amount(g[0])
+        desc = (g[0] if parse_amount(g[1]) else g[1]).strip().lower()
+
+        if amt and amt > 0 and desc and not re.match(r"^\d", desc):
+            cat_map = [
+                (["еда","продукт","обед","ужин","завтрак","кафе","ресторан","пицца","суши",
+                  "шаурма","бургер","кофе","чай","сок","доставка","магазин","ашан","сільпо",
+                  "атб","новус","перекус","снек","фрукт","хлеб","молоко","alco","алко"], "Еда / продукты", "🍔"),
+                (["такси","бензин","заправк","автобус","метро","маршрутк","парковк","мойк",
+                  "сто ","ремонт авто","запчаст","uber","bolt","поїзд","автовокзал"], "Транспорт", "🚗"),
+                (["кино","игр","steam","netflix","spotify","боулинг","концерт","клуб",
+                  "розваг","підписк","subscription","iptv"], "Развлечения", "🎮"),
+                (["аптек","лікарств","лекарств","врач","лікар","медиц","стоматолог","масаж","массаж",
+                  "парикмах","манікюр","маникюр","спортзал","фитнес","косметолог"], "Здоровье / аптека", "💊"),
+                (["снюс","сигарет","вейп","кальян","никотин","zyn","velo","табак","тютюн"], "Никотин", "🚬"),
+                (["гимнастик","йога","плаван","бокс","тренировк","тренуван","зал ","спорт ",
+                  "пробежк","бег","велосипед","воркаут","качалк","фізкультур","гімнастик"], "Спорт", "💪"),
+                (["курс","учеб","навчан","репетитор","школ","универ","книг","образован",
+                  "english","урок","лекци","семинар","навчання"], "Образование", "📚"),
+                (["одяг","одежд","обувь","шопинг","брюки","футболк","платт","куртк","сумк","взуття"], "Одежда", "👕"),
+                (["комунальн","комунальні","квартир","аренд","оренд","кварплат","жкх","свет","газ",
+                  "вода","інтернет","інтернет","мобільн","мобильн","телефон","зв'язок"], "Коммунальные", "🏠"),
+            ]
+            category, emoji = "Другое", "📦"
+            for keywords, cat, em in cat_map:
+                if any(k in desc for k in keywords):
+                    category, emoji = cat, em
+                    break
+            # Пользовательские категории
+            for uc in _user_categories:
+                if uc.lower() in desc or desc in uc.lower():
+                    category = uc
+                    emoji = get_category_emoji(uc)
+                    break
+            return [{"action": "expense", "expenses": [{"amount": amt, "category": category, "description": desc.capitalize(), "emoji": emoji}]}]
+
+    return None  # не смог — отдаём LLM
+
 # ── ИИ-РОУТЕР — сердце бота ──────────────────────────────────────────────────
-ROUTER_SYSTEM = """Финансовый бот. Верни ТОЛЬКО JSON {"actions":[...]}.
+ROUTER_SYSTEM = """Финансовый бот. Верни ТОЛЬКО JSON {{"actions":[...]}}.
 
 ДЕЙСТВИЯ:
-expense: {"action":"expense","expenses":[{"amount":N,"category":"C","description":"D","emoji":"E"}]}
-debt_new: {"action":"debt_new","name":"N","amounts":[{"amount":N,"currency":"UAH"}],"note":""}
-debt_return: {"action":"debt_return","name":"N","amount":N,"currency":"UAH"}
-debt_remind: {"action":"debt_remind","name":"N","minutes":N}
-budget_set: {"action":"budget_set","amount":N}
-salary_set: {"action":"salary_set","day":N,"amount":N}
-goal_new: {"action":"goal_new","name":"N","amount":N,"emoji":"E"}
-goal_deposit: {"action":"goal_deposit","amount":N,"goal_name":"N"}
-category_add: {"action":"category_add","name":"N","emoji":"E"}
-expense_delete: {"action":"expense_delete","description":null,"amount":null,"category":null}
-expense_edit: {"action":"expense_edit","old_category":"C","new_category":"C","amount":null,"description":""}
-periodic_reminder: {"action":"periodic_reminder","type":"weekday","weekday":0,"time":"09:00","text":"T"}
-question: {"action":"question","text":"T"}
+expense: {{"action":"expense","expenses":[{{"amount":N,"category":"C","description":"D","emoji":"E"}}]}}
+debt_new: {{"action":"debt_new","name":"N","amounts":[{{"amount":N,"currency":"UAH"}}],"note":""}}
+debt_add: {{"action":"debt_add","name":"N","amount":N,"currency":"UAH"}}
+debt_return: {{"action":"debt_return","name":"N","amount":N,"currency":"UAH"}}
+debt_remind: {{"action":"debt_remind","name":"N","minutes":N}}
+budget_set: {{"action":"budget_set","amount":N}}
+salary_set: {{"action":"salary_set","day":N,"amount":N}}
+goal_new: {{"action":"goal_new","name":"N","amount":N,"emoji":"E"}}
+goal_deposit: {{"action":"goal_deposit","amount":N,"goal_name":"N"}}
+convert: {{"action":"convert","amount":N,"from_currency":"USD","to_currency":"UAH"}}
+category_add: {{"action":"category_add","name":"N","emoji":"E"}}
+expense_delete: {{"action":"expense_delete","description":null,"amount":null,"category":null}}
+expense_edit: {{"action":"expense_edit","old_category":"C","new_category":"C","amount":null,"description":""}}
+question: {{"action":"question","text":"T"}}
 
-КАТЕГОРИИ: "Еда / продукты","Транспорт","Развлечения","Здоровье / аптека","Никотин","Другое",{user_cats}
+КАТЕГОРИИ: "Еда / продукты","Транспорт","Развлечения","Здоровье / аптека","Никотин","Другое"
+Пользовательские: {user_cats}
 ДОЛГИ: {debts} | ЦЕЛИ: {goals} | КОНТЕКСТ: {context}
 
-Правила: "3к"=3000 | рус/укр одинаково | спорт/тренировки→"Спорт" | еда/кофе/обед→"Еда / продукты"
-Несколько команд в одном сообщении → все в массиве.
-{"actions": [...]}"""
+Правила: "3к"=3000 | рус/укр одинаково | спорт/йога/тренировки→"Спорт" | несколько команд→все в массиве
+{{"actions": [...]}}"""
 
 async def route_message(text: str, chat_id, conv_ctx: dict) -> list:
     """ИИ определяет ВСЕ действия из сообщения, возвращает список"""
@@ -1408,10 +1440,16 @@ async def route_message(text: str, chat_id, conv_ctx: dict) -> list:
         {"role": "assistant", "content": '{"actions":[{"action":"debt_new","name":"Саша","amounts":[{"amount":500,"currency":"UAH"}],"note":""},{"action":"budget_set","amount":25000}]}'},
         {"role": "user", "content": "гимнастика 300"},
         {"role": "assistant", "content": '{"actions":[{"action":"expense","expenses":[{"amount":300,"category":"Спорт","description":"гимнастика","emoji":"🤸"}]}]}'},
+        {"role": "user", "content": "зарплата 6-го 25 000"},
+        {"role": "assistant", "content": '{"actions":[{"action":"salary_set","day":6,"amount":25000}]}'},
         {"role": "user", "content": "удали последнюю"},
         {"role": "assistant", "content": '{"actions":[{"action":"expense_delete","description":null,"amount":null,"category":null}]}'},
-        {"role": "user", "content": "напомни каждый понедельник в 9:00 проверить бюджет"},
-        {"role": "assistant", "content": '{"actions":[{"action":"periodic_reminder","type":"weekday","weekday":0,"time":"09:00","text":"проверить бюджет"}]}'},
+        {"role": "user", "content": "добавь категорию Инвестиции"},
+        {"role": "assistant", "content": '{"actions":[{"action":"category_add","name":"Инвестиции","emoji":"📈"}]}'},
+        {"role": "user", "content": "100 баксів в гривні"},
+        {"role": "assistant", "content": '{"actions":[{"action":"convert","amount":100,"from_currency":"USD","to_currency":"UAH"}]}'},
+        {"role": "user", "content": "сколько потратил на еду?"},
+        {"role": "assistant", "content": '{"actions":[{"action":"question","text":"сколько потратил на еду?"}]}'},
         {"role": "user", "content": text},
     ]
     try:
@@ -1434,7 +1472,7 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         if not expenses: return "🤔 Не понял сумму. Например: «Кофе 85»"
         date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
         month_recs = get_current_month_records()
-        saved_rows = []
+        lines = ["✅ *Записано!*\n"]
         for exp in expenses:
             amount = float(str(exp.get("amount",0)).replace(",","."))
             if amount <= 0: continue
@@ -1442,71 +1480,32 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
             desc = exp.get("description","—")
             emoji = exp.get("emoji","")
             save_expense(date, amount, cat, desc, text)
-            saved_rows.append({"amount": amount, "cat": cat, "desc": desc, "emoji": emoji})
-        if not saved_rows: return "🤔 Не понял сумму. Например: «Кофе 85»"
-
-        now_dt = datetime.now(KYIV_TZ)
-        day_name = DAY_NAMES[now_dt.weekday()]
-        time_str = now_dt.strftime("%H:%M")
-
-        lines = [f"✅ *Записано* · _{day_name}, {time_str}_"]
-        lines.append("▸ " + "  ▸ ".join(
-            f"{row['emoji'] or get_category_emoji(row['cat'])} *{row['desc']}* — *{fmt(row['amount'])} ₴*"
-            for row in saved_rows
-        ))
-        if len(saved_rows) > 1:
-            total = sum(r["amount"] for r in saved_rows)
-            lines.append(f"💰 *Итого: {fmt(total)} ₴*")
-
-        cat0 = saved_rows[0]["cat"]
-        cat_emoji0 = get_category_emoji(cat0)
+            lines.append(f"{emoji} *{desc}* — *{fmt(amount)} ₴*\n   _{get_category_emoji(cat)} {cat}_")
+        if len(expenses) > 1:
+            total = sum(float(str(e.get("amount",0)).replace(",",".")) for e in expenses)
+            lines.append(f"\n💰 *Итого: {fmt(total)} ₴*")
+        cat0 = fix_cat(expenses[0].get("category","Другое"))
         sk = get_sum_key(month_recs)
         cat_total = sum(float(r[sk]) for r in month_recs if fix_cat(r.get("Категория",""))==cat0 and r.get(sk))
-        cat_total += sum(r["amount"] for r in saved_rows if r["cat"] == cat0)
-
-        month_budget = None
-        try:
-            b = float(get_setting(f"budget_{chat_id}", 0) or 0)
-            if b > 0:
-                all_month = get_current_month_records()
-                spent = sum(float(r[get_sum_key(all_month)]) for r in all_month if r.get(get_sum_key(all_month)))
-                spent += sum(r["amount"] for r in saved_rows)
-                pct = int(spent / b * 100)
-                filled = min(int(pct / 10), 10)
-                bar = "█" * filled + "░" * (10 - filled)
-                bar_icon = "🔴" if pct >= 90 else "🟡" if pct >= 70 else "🟢"
-                month_budget = f"{bar_icon} `[{bar}]` {pct}% бюджету"
-        except: pass
-
-        footer_parts = []
         if cat_total > 0:
-            footer_parts.append(f"{cat_emoji0} _{cat0}: {fmt(cat_total)} ₴ за місяць_")
-        if month_budget:
-            footer_parts.append(month_budget)
-        if footer_parts:
-            lines.append("\n".join(footer_parts))
-
+            lines.append(f"\n_{get_category_emoji(cat0)} {cat0} за месяц: *{fmt(cat_total)} ₴*_")
+        bs = get_budget_status(chat_id)
+        if bs:
+            pct = bs["percent"]
+            if pct >= 90: lines.append(f"\n🔴 *Бюджет на {pct}%!*")
+            elif pct >= 70: lines.append(f"\n🟡 Бюджет на {pct}%")
         set_ctx(chat_id, last_action="expense")
         return "\n".join(lines)
 
     # ── УДАЛИТЬ ТРАТУ ──
     elif action == "expense_delete":
-        desc_hint = (route.get("description") or "").lower()
+        desc_hint = route.get("description","").lower()
         amount_hint = route.get("amount")
-        cat_hint = (route.get("category") or "").lower()
-        # Если нет никаких подсказок — удаляем последнюю запись
-        delete_last = not desc_hint and not amount_hint and not cat_hint
+        cat_hint = route.get("category","").lower()
         try:
             all_recs = get_all_records()
             sh = get_sheet()
             sk = get_sum_key(all_recs)
-            if delete_last:
-                last = all_recs[-1]
-                row_idx = len(all_recs) + 1
-                sh.delete_rows(row_idx)
-                _invalidate("sheet1")
-                cat = last.get("Категория","?")
-                return f"🗑 *{last.get('Описание','?')}* — *{last.get(sk,'?')} ₴* удалено."
             for i, r in enumerate(reversed(all_recs), 1):
                 row_idx = len(all_recs) - i + 2
                 r_desc = r.get("Описание","").lower()
@@ -1518,7 +1517,7 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
                 if desc_ok and amt_ok and cat_ok:
                     sh.delete_rows(row_idx)
                     _invalidate("sheet1")
-                    return f"🗑 *{r.get('Описание','?')}* — *{r.get(sk,'?')} ₴* удалено."
+                    return f"🗑 Запись *{r.get('Описание','?')}* — *{r.get(sk,'?')} ₴* удалена."
             return "🤔 Не нашёл такую запись."
         except Exception as e:
             logger.error(f"expense_delete: {e}")
@@ -1734,65 +1733,6 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         set_ctx(chat_id, last_name=d["name"], last_action="debt_remind")
         return f"⏰ Напомню о долге *{d['name']}* через *{label}*."
 
-    # ── ПЕРИОДИЧЕСКОЕ НАПОМИНАНИЕ ──
-    elif action == "periodic_reminder":
-        reminder_type = route.get("type", "weekday")
-        weekday = route.get("weekday")
-        time_str = route.get("time", "09:00")
-        reminder_text = route.get("text", "Напоминание")
-        date_str = route.get("date")
-
-        try:
-            h, m = map(int, time_str.split(":"))
-            remind_time = dtime(h, m, tzinfo=KYIV_TZ)
-        except:
-            remind_time = dtime(9, 0, tzinfo=KYIV_TZ)
-
-        WEEKDAY_NAMES = ["понедельник","вторник","среду","четверг","пятницу","субботу","воскресенье"]
-        WEEKDAY_NAMES_SHORT = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
-
-        if reminder_type == "weekday" and weekday is not None:
-            job_name = f"periodic_{chat_id}_{weekday}"
-            for job in context.job_queue.get_jobs_by_name(job_name):
-                job.schedule_removal()
-            context.job_queue.run_daily(
-                _send_periodic_reminder,
-                time=remind_time,
-                days=(weekday,),
-                data={"chat_id": chat_id, "text": reminder_text},
-                name=job_name
-            )
-            day_name = WEEKDAY_NAMES[weekday] if weekday < len(WEEKDAY_NAMES) else str(weekday)
-            return f"⏰ Буду напоминать каждый *{day_name}* в *{time_str}*\n_«{reminder_text}»_"
-
-        elif reminder_type == "once":
-            now = datetime.now(KYIV_TZ)
-            if weekday is not None:
-                # Найти следующий нужный день недели
-                days_ahead = (weekday - now.weekday()) % 7
-                if days_ahead == 0: days_ahead = 7
-                target_date = now + timedelta(days=days_ahead)
-            elif date_str:
-                try:
-                    target_date = datetime.strptime(date_str, "%d.%m.%Y").replace(tzinfo=KYIV_TZ)
-                except:
-                    return "❌ Не понял дату. Попробуй: «следующий вторник» или «напомни 15.04»"
-            else:
-                return "❌ Укажи день или дату."
-
-            run_at = target_date.replace(hour=remind_time.hour, minute=remind_time.minute, second=0, microsecond=0)
-            if run_at <= now:
-                return "❌ Это время уже прошло."
-            context.job_queue.run_once(
-                _send_periodic_reminder,
-                when=run_at,
-                data={"chat_id": chat_id, "text": reminder_text}
-            )
-            day_label = run_at.strftime("%d.%m") + f" ({WEEKDAY_NAMES_SHORT[run_at.weekday()]})"
-            return f"⏰ Напомню *{day_label}* в *{time_str}*\n_«{reminder_text}»_"
-
-        return "🤔 Не понял формат напоминания."
-
     # ── ВОПРОС ──
     elif action == "question":
         q = route.get("text", text)
@@ -1801,107 +1741,13 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
     return None
 
 
-def _regex_route(text: str) -> list | None:
-    """Быстрый роутер без LLM — обрабатывает ~80% команд"""
-    import re as _r
-    t = text.strip()
-
-    # Трата: "кофе 85", "обед 650 грн", "3к бензин"
-    # Паттерн: [описание] [сумма] или [сумма] [описание]
-    m = _r.match(
-        r"^([а-яёіїєa-zА-ЯЁІЇЄа-яёіїєA-Za-z][а-яёіїєa-zА-ЯЁІЇЄа-яёіїє\w\s/-]{0,40}?)\s+"
-        r"(\d[\d\s]*(?:[.,]\d+)?(?:\s*к(?:р|ривень|уб)?|\s*тис(?:яч)?)?)\s*(?:₴|грн|грн\.?|uah)?$",
-        t, _r.IGNORECASE
-    ) or _r.match(
-        r"^(\d[\d\s]*(?:[.,]\d+)?(?:\s*к(?:р|ривень|уб)?|\s*тис(?:яч)?)?)\s*(?:₴|грн|uah)?\s+"
-        r"([а-яёіїєa-zА-ЯЁІЇЄа-яёіїєa-zA-Z][а-яёіїєa-zА-ЯЁІЇЄа-яёіїє\w\s/-]{1,40})$",
-        t, _r.IGNORECASE
-    )
-    if m:
-        g = m.groups()
-        # Определяем где сумма, где описание
-        def parse_amount(s):
-            s = s.strip().replace(" ","").replace(",",".")
-            mult = 1000 if _r.search(r"к(?:р|ривень|уб)?$|тис", s, _r.IGNORECASE) else 1
-            s = _r.sub(r"[кктис]+.*$", "", s, flags=_r.IGNORECASE)
-            try: return float(s) * mult
-            except: return None
-
-        # Пробуем оба варианта — кто из них число
-        amt = parse_amount(g[1]) or parse_amount(g[0])
-        desc = (g[0] if parse_amount(g[1]) else g[1]).strip().lower()
-
-        if amt and amt > 0 and desc and not _r.match(r'^\d', desc):
-            # Автоопределение категории
-            cat_map = [
-                (["еда","продукт","обед","ужин","завтрак","кафе","ресторан","пицца","суши",
-                  "шаурма","бургер","кофе","чай","сок","доставка","магазин","ашан","сильпо",
-                  "атб","новус","перекус","снек","фрукт","овощ","хлеб","молоко"], "Еда / продукты", "🍔"),
-                (["такси","бензин","заправк","автобус","метро","маршрутк","парковк","мойк",
-                  "сто ","ремонт авто","запчаст","uber","bolt","укрзалізниц","поїзд","автовокзал"], "Транспорт", "🚗"),
-                (["кино","игр","steam","netflix","spotify","боулинг","концерт","клуб",
-                  "развлеч","підписк","підписка","subscription","тв","iptv"], "Развлечения", "🎮"),
-                (["аптек","лекарств","врач","медиц","стоматолог","массаж","парикмах",
-                  "манікюр","маникюр","спортзал","фитнес","косметолог","hospital","clinic"], "Здоровье / аптека", "💊"),
-                (["снюс","сигарет","вейп","кальян","никотин","zyn","velo","табак","тютюн"], "Никотин", "🚬"),
-                (["гимнастик","йога","плаван","бокс","тренировк","тренуван","зал ","спорт",
-                  "пробежк","бег","велосипед","воркаут","качалк","фізкультур"], "Спорт", "💪"),
-                (["курс","учеб","навчан","репетитор","школ","универ","книг","образован",
-                  "english","урок","лекци","семинар"], "Образование", "📚"),
-                (["одяг","одежд","обувь","шопинг","брюки","футболк","платт","куртк","сумк"], "Одежда", "👕"),
-                (["комунальн","квартир","аренд","оренд","кварплат","жкх","свет","газ",
-                  "вода","интернет","мобільн","мобильн","телефон","зв'язок"], "Коммунальные", "🏠"),
-            ]
-            category = "Другое"
-            emoji = "📦"
-            for keywords, cat, em in cat_map:
-                if any(k in desc for k in keywords):
-                    category = cat
-                    emoji = em
-                    break
-            # Проверяем пользовательские категории
-            for uc in _user_categories:
-                if uc.lower() in desc or desc in uc.lower():
-                    category = uc
-                    emoji = get_category_emoji(uc)
-                    break
-            desc_cap = desc.capitalize()
-            return [{"action":"expense","expenses":[{"amount":amt,"category":category,"description":desc_cap,"emoji":emoji}]}]
-
-    # Бюджет: "бюджет 25000", "бюджет на месяц 25к"
-    m = _r.search(r"бюджет[^\d]*(\d[\d\s]*(?:[.,]\d+)?(?:\s*к)?)", t, _r.IGNORECASE)
-    if m:
-        s = m.group(1).strip().replace(" ","").replace(",",".")
-        mult = 1000 if s.endswith("к") else 1
-        s = s.rstrip("к")
-        try:
-            return [{"action":"budget_set","amount":float(s)*mult}]
-        except: pass
-
-    # Зарплата: "зарплата 6го 25000", "зарплата 25000 6 числа"
-    m = _r.search(r"зарплат[аы]?\s+(\d{1,2})(?:го|числа|ого)?\s+(\d[\d.,]*(?:\s*к)?)"
-                  r"|зарплат[аы]?\s+(\d[\d.,]*(?:\s*к)?)\s+(\d{1,2})(?:го|числа)", t, _r.IGNORECASE)
-    if m:
-        g = [x for x in m.groups() if x]
-        try:
-            day = int(g[0]) if int(g[0]) <= 31 else int(g[1])
-            amt_s = g[1] if int(g[0]) <= 31 else g[0]
-            amt_s = amt_s.strip().replace(" ","").replace(",",".")
-            mult = 1000 if amt_s.endswith("к") else 1
-            amt_s = amt_s.rstrip("к")
-            return [{"action":"salary_set","day":day,"amount":float(amt_s)*mult}]
-        except: pass
-
-    return None  # не смог обработать — отдаём LLM
-
-
 async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     chat_id = update.effective_chat.id
     conv_ctx = get_ctx(chat_id)
 
     await update.message.reply_chat_action("typing")
 
-    # Сначала пробуем быстрый regex-роутер (без LLM, бесплатно)
+    # Сначала пробуем быстрый regex-роутер (без LLM)
     regex_actions = _regex_route(text)
     if regex_actions:
         logger.info(f"RegexRouter: '{text[:50]}' → {[a.get('action') for a in regex_actions]}")
@@ -1914,11 +1760,7 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
                 logger.error(f"regex execute_action {route.get('action')}: {e}")
         if responses:
             combined = "\n\n".join(responses)
-            if len(combined) <= 4096:
-                await update.message.reply_text(combined, parse_mode="Markdown")
-            else:
-                for r in responses:
-                    await update.message.reply_text(r, parse_mode="Markdown")
+            await update.message.reply_text(combined if len(combined) <= 4096 else responses[0], parse_mode="Markdown")
             return
 
     actions = await route_message(text, chat_id, conv_ctx)
@@ -2192,34 +2034,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("💰 Финансы","menu_stats"),("📊 Аналитика","menu_week")],
             [("💸 Долги","show_debts"),("🎯 Цели","back_goals")],
         ])); return
-
-    # ── ОТМЕНИТЬ ПОСЛЕДНЮЮ ТРАТУ ──
-    if data == "undo_last_expense":
-        try:
-            all_recs = get_all_records()
-            sh = get_sheet()
-            if not all_recs:
-                await query.edit_message_text("🤔 Записей нет.")
-                return
-            last = all_recs[-1]
-            row_idx = len(all_recs) + 1  # +1 за заголовок
-            sk = get_sum_key(all_recs)
-            desc = last.get("Описание", "?")
-            amount = last.get(sk, "?")
-            cat = last.get("Категория", "?")
-            sh.delete_rows(row_idx)
-            _invalidate("sheet1")
-            await query.edit_message_text(
-                f"🗑 *Запись удалена*\n"
-                f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-                f"{get_category_emoji(cat)} *{desc}* — *{fmt(float(amount))} ₴*\n"
-                f"_{cat}_",
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logger.error(f"undo_last_expense: {e}")
-            await query.edit_message_text("❌ Не удалось удалить запись.")
-        return
 
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
