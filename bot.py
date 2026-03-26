@@ -485,18 +485,29 @@ async def fetch_monobank_rates() -> dict:
         logger.error(f"monobank rates: {e}")
         return {}
 
-
-import httpx
-import re
-from datetime import datetime
-
-_obmen_cache = {}
-_obmen_ts = 0
-
-
 async def fetch_obmen_rates():
-    """Курс обменников с obmen24 HTML (Львов)"""
+    """
+    Курс обменников Obmen24 (Львов) через HTML-страницу:
+    https://obmen24.com.ua/uk/lviv
+
+    Возвращает:
+    {
+        "USD": {"buy": 43.80, "sale": 44.00},
+        "EUR": {"buy": 50.85, "sale": 51.05}
+    }
+
+    Логика:
+    1) Парсим точные строки вида:
+       USD/UAH 43.80 44.00
+       EUR/UAH 50.85 51.05
+    2) Если не нашли - fallback на Приват
+    3) Кэш 10 минут
+    """
     global _obmen_cache, _obmen_ts
+
+    import re
+    import httpx
+    from datetime import datetime
 
     now_ts = datetime.now(KYIV_TZ).timestamp()
 
@@ -504,67 +515,72 @@ async def fetch_obmen_rates():
     if _obmen_cache and now_ts - _obmen_ts < 600:
         return _obmen_cache
 
-    SEARCH_KEYS = {
-        "USD": ["USD", "Долар", "Dollar", "$"],
-        "EUR": ["EUR", "Євро", "Euro", "€"],
-    }
-
-    num_pat = re.compile(r"(\d{2,3}[.,]\d{1,4})")
-
-    def _extract_two_rates(chunk: str):
-    nums = []
-    for n in num_pat.findall(chunk):
+    def _to_float(v):
         try:
-            val = float(n.replace(",", "."))
-            if 30 < val < 200:
-                nums.append(val)
+            return float(str(v).replace(",", ".").strip())
         except Exception:
-            continue
+            return None
 
-    # Убираем подряд идущие дубликаты
-    cleaned = []
-    for x in nums:
-        if not cleaned or abs(cleaned[-1] - x) > 0.001:
-            cleaned.append(x)
+    def _normalize_pair(a, b):
+        a = _to_float(a)
+        b = _to_float(b)
+        if a is None or b is None:
+            return None
 
-    if len(cleaned) >= 2:
-        a, b = cleaned[0], cleaned[1]
+        # Для обменника buy < sale
+        return {
+            "buy": min(a, b),
+            "sale": max(a, b),
+        }
 
-        # Для обменников покупка обычно меньше продажи
-        buy = min(a, b)
-        sale = max(a, b)
+    def _is_valid_rate(cur: str, pair: dict) -> bool:
+        if not pair:
+            return False
 
-        return {"buy": buy, "sale": sale}
+        buy = pair.get("buy")
+        sale = pair.get("sale")
 
-    return None
+        if buy is None or sale is None:
+            return False
+        if buy <= 0 or sale <= 0:
+            return False
+        if buy >= sale:
+            return False
 
-    def _parse_rates_from_html(html: str) -> dict:
-        result = {}
+        if cur == "USD":
+            return 35 <= buy <= 60 and 35 <= sale <= 60
 
-        # Нормализуем пробелы
-        compact_html = re.sub(r"\s+", " ", html)
+        if cur == "EUR":
+            return 40 <= buy <= 70 and 40 <= sale <= 70
 
-        for cur, keys in SEARCH_KEYS.items():
-            found = False
+        return True
 
-            for key in keys:
-                # Ищем ВСЕ вхождения, а не первое
-                for match in re.finditer(re.escape(key), compact_html, flags=re.IGNORECASE):
-                    idx = match.start()
+    async def _fetch_privat_fallback():
+        """Fallback на Приват."""
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                resp = await client.get(
+                    "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5"
+                )
+                resp.raise_for_status()
+                data = resp.json()
 
-                    # Берём небольшой блок после ключа
-                    chunk = compact_html[idx: idx + 500]
+            result = {}
+            for item in data:
+                ccy = item.get("ccy", "")
+                if ccy in ("USD", "EUR"):
+                    pair = _normalize_pair(item.get("buy"), item.get("sale"))
+                    if _is_valid_rate(ccy, pair):
+                        result[ccy] = pair
 
-                    parsed = _extract_two_rates(chunk)
-                    if parsed:
-                        result[cur] = parsed
-                        found = True
-                        break
+            if result:
+                logger.info(f"PrivatBank fallback parsed: {result}")
 
-                if found:
-                    break
+            return result
 
-        return result
+        except Exception as e:
+            logger.error(f"PrivatBank fallback error: {e}")
+            return {}
 
     try:
         async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
@@ -579,53 +595,66 @@ async def fetch_obmen_rates():
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.8",
                     "Referer": "https://obmen24.com.ua/",
+                    "Cache-Control": "no-cache",
                 }
             )
-
             resp.raise_for_status()
             html = resp.text
 
-        result = _parse_rates_from_html(html)
+        # Уплотняем пробелы, чтобы regex стабильно работал
+        compact_html = re.sub(r"\s+", " ", html)
 
-        # Проверяем, что есть обе валюты
-        if result and ("USD" in result or "EUR" in result):
+        result = {}
+
+        # Ищем точные строки вида:
+        # USD/UAH 43.80 44.00
+        # EUR/UAH 50.85 51.05
+        #
+        # Берем первое совпадение для каждой валюты.
+        patterns = {
+            "USD": r"\bUSD\s*/\s*UAH\s+(\d{2,3}[.,]\d{1,4})\s+(\d{2,3}[.,]\d{1,4})\b",
+            "EUR": r"\bEUR\s*/\s*UAH\s+(\d{2,3}[.,]\d{1,4})\s+(\d{2,3}[.,]\d{1,4})\b",
+        }
+
+        for cur, pattern in patterns.items():
+            m = re.search(pattern, compact_html, flags=re.IGNORECASE)
+            if m:
+                pair = _normalize_pair(m.group(1), m.group(2))
+                if _is_valid_rate(cur, pair):
+                    result[cur] = pair
+
+        # Если нашли обе валюты — отлично
+        if "USD" in result and "EUR" in result:
             _obmen_cache = result
             _obmen_ts = now_ts
-            logger.info(f"obmen24 parsed HTML: {result}")
+            logger.info(f"obmen24 parsed HTML exact: {result}")
             return result
 
-        raise ValueError("obmen24 parse empty or invalid")
+        # Если нашли не всё — дотягиваем из Привата
+        privat = await _fetch_privat_fallback()
+
+        merged = result.copy()
+        for cur in ("USD", "EUR"):
+            if cur not in merged and cur in privat:
+                merged[cur] = privat[cur]
+
+        if merged:
+            _obmen_cache = merged
+            _obmen_ts = now_ts
+            logger.info(f"obmen24 partial + Privat fallback: {merged}")
+            return merged
+
+        raise ValueError("No valid rates from obmen24 HTML and no fallback data")
 
     except Exception as e:
-        logger.warning(f"obmen24 HTML parse error: {e}")
+        logger.error(f"obmen24 HTML parse error: {e}")
 
-        # fallback на Приват
-        try:
-            async with httpx.AsyncClient(timeout=8) as client:
-                resp = await client.get(
-                    "https://api.privatbank.ua/p24api/pubinfo?json&exchange&coursid=5"
-                )
-                resp.raise_for_status()
-                data = resp.json()
+        # Финальный fallback на Приват
+        privat = await _fetch_privat_fallback()
+        if privat:
+            return privat
 
-            result = {}
-            for item in data:
-                ccy = item.get("ccy", "")
-                if ccy in ("USD", "EUR"):
-                    result[ccy] = {
-                        "buy": float(item.get("buy", 0) or 0),
-                        "sale": float(item.get("sale", 0) or 0),
-                    }
-
-            if result:
-                logger.info(f"PrivatBank fallback parsed: {result}")
-                return result
-
-            raise ValueError("PrivatBank returned empty data")
-
-        except Exception as e:
-            logger.error(f"PrivatBank fallback error: {e}")
-            return {}
+        return {}
 async def build_rates_msg() -> str:
     nbu, mono, obmen = await asyncio.gather(
         fetch_nbu_rates(), fetch_monobank_rates(), fetch_obmen_rates()
