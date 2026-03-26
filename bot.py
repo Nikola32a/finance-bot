@@ -530,8 +530,8 @@ async def fetch_obmen_rates() -> dict:
 
                 if len(nums) >= 2:
                     result[cur] = {
-                        "buy": nums[0],
-                        "sale": nums[1]
+                        "buy": nums[1],
+                        "sale": nums[0]
                     }
                     break
 
