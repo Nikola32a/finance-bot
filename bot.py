@@ -1379,17 +1379,14 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
             saved_rows.append({"amount": amount, "cat": cat, "desc": desc, "emoji": emoji})
         if not saved_rows: return "🤔 Не понял сумму. Например: «Кофе 85»"
 
-        lines = ["✅ *Записано!*", "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"]
+        lines = ["✅ *Записано!*"]
         for row in saved_rows:
             cat_emoji = get_category_emoji(row["cat"])
-            lines.append(f"{row['emoji'] or cat_emoji} *{row['desc']}*")
-            lines.append(f"   💳 *{fmt(row['amount'])} ₴*  ·  {cat_emoji} _{row['cat']}_")
+            lines.append(f"{row['emoji'] or cat_emoji} *{row['desc']}*  💳 *{fmt(row['amount'])} ₴*")
         if len(saved_rows) > 1:
             total = sum(r["amount"] for r in saved_rows)
-            lines.append("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄")
             lines.append(f"💰 *Итого: {fmt(total)} ₴*")
 
-        lines.append("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄")
         cat0 = saved_rows[0]["cat"]
         sk = get_sum_key(month_recs)
         cat_total = sum(float(r[sk]) for r in month_recs if fix_cat(r.get("Категория",""))==cat0 and r.get(sk))
@@ -1397,35 +1394,27 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         if cat_total > 0:
             lines.append(f"📊 _{get_category_emoji(cat0)} {cat0} за месяц: *{fmt(cat_total)} ₴*_")
 
-        bs = get_budget_status(chat_id)
-        if bs:
-            pct = bs["percent"]
-            bar_filled = int(pct / 10)
-            bar = "█" * bar_filled + "░" * (10 - bar_filled)
-            if pct >= 90:
-                lines.append(f"🔴 *Бюджет [{bar}] {pct}%*")
-            elif pct >= 70:
-                lines.append(f"🟡 Бюджет [{bar}] {pct}%")
-            else:
-                lines.append(f"🟢 Бюджет [{bar}] {pct}%")
-
         set_ctx(chat_id, last_action="expense")
-        msg_text = "\n".join(lines)
-        undo_kb = inline_kb([[("🗑 Отменить запись", "undo_last_expense")]])
-        if update and hasattr(update, "message") and update.message:
-            await update.message.reply_text(msg_text, parse_mode="Markdown", reply_markup=undo_kb)
-            return None
-        return msg_text
+        return "\n".join(lines)
 
     # ── УДАЛИТЬ ТРАТУ ──
     elif action == "expense_delete":
-        desc_hint = route.get("description","").lower()
+        desc_hint = (route.get("description") or "").lower()
         amount_hint = route.get("amount")
-        cat_hint = route.get("category","").lower()
+        cat_hint = (route.get("category") or "").lower()
+        # Если нет никаких подсказок — удаляем последнюю запись
+        delete_last = not desc_hint and not amount_hint and not cat_hint
         try:
             all_recs = get_all_records()
             sh = get_sheet()
             sk = get_sum_key(all_recs)
+            if delete_last:
+                last = all_recs[-1]
+                row_idx = len(all_recs) + 1
+                sh.delete_rows(row_idx)
+                _invalidate("sheet1")
+                cat = last.get("Категория","?")
+                return f"🗑 *{last.get('Описание','?')}* — *{last.get(sk,'?')} ₴* удалено."
             for i, r in enumerate(reversed(all_recs), 1):
                 row_idx = len(all_recs) - i + 2
                 r_desc = r.get("Описание","").lower()
@@ -1437,7 +1426,7 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
                 if desc_ok and amt_ok and cat_ok:
                     sh.delete_rows(row_idx)
                     _invalidate("sheet1")
-                    return f"🗑 Запись *{r.get('Описание','?')}* — *{r.get(sk,'?')} ₴* удалена."
+                    return f"🗑 *{r.get('Описание','?')}* — *{r.get(sk,'?')} ₴* удалено."
             return "🤔 Не нашёл такую запись."
         except Exception as e:
             logger.error(f"expense_delete: {e}")
