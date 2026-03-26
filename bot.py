@@ -808,6 +808,8 @@ def build_insight() -> str:
         lines.append(f"📈 Прогноз месяца: *~{fmt(avg_day*30)} ₴*")
     lines.append(f"\n💰 За неделю: *{fmt(s['total'])} ₴* ({s['count']} записей)")
     return "\n".join(lines)
+
+async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data or {}
     did = data.get("debt_id")
     cid = data.get("chat_id") or CHAT_ID
