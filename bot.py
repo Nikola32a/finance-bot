@@ -809,6 +809,222 @@ def build_insight() -> str:
     lines.append(f"\n💰 За неделю: *{fmt(s['total'])} ₴* ({s['count']} записей)")
     return "\n".join(lines)
 
+# ── ВСПОМОГАТЕЛЬНЫЕ ДЛЯ ОТЧЁТОВ ──────────────────────────────────────────────
+def month_name(n: int, gen: bool = False) -> str:
+    mn = ["Январь","Февраль","Март","Апрель","Май","Июнь",
+          "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
+    mn_gen = ["января","февраля","марта","апреля","мая","июня",
+              "июля","августа","сентября","октября","ноября","декабря"]
+    return (mn_gen if gen else mn)[n - 1]
+
+def _cat_lines(stats: dict, limit: int = None) -> list:
+    items = sorted(stats["by_category"].items(), key=lambda x: -x[1])
+    if limit: items = items[:limit]
+    lines = []
+    for cat, amt in items:
+        pct = int(amt / stats["total"] * 100)
+        lines.append(f"{get_category_emoji(cat)} {cat}: *{fmt(amt)} ₴* ({pct}%)")
+    return lines
+
+def _leak_lines(stats: dict) -> list:
+    if not stats.get("leaks"): return []
+    lines = ["\n💸 *Частые траты:*"]
+    for desc, d in list(stats["leaks"].items())[:3]:
+        lines.append(f"• {desc}: {d['count']}× = *{fmt(d['total'])} ₴*")
+    return lines
+
+def build_weekly_report() -> str:
+    recs = get_week_records()
+    if not recs: return "📭 За прошлую неделю трат нет."
+    s = analyze_records(recs)
+    lines = ["📅 *Отчёт за неделю*\n",
+             f"💰 Потрачено: *{fmt(s['total'])} ₴* ({s['count']} записей)\n",
+             "*По категориям:*"] + _cat_lines(s)
+    if s["by_day"]:
+        td = max(s["by_day"], key=s["by_day"].get)
+        lines.append(f"\n📈 Самый дорогой день: *{td}* — {fmt(s['by_day'][td])} ₴")
+    lines += _leak_lines(s)
+    return "\n".join(lines)
+
+def build_monthly_report() -> str:
+    recs = get_current_month_records()
+    if not recs: return "📭 В этом месяце трат нет."
+    s = analyze_records(recs)
+    now = datetime.now()
+    avg = s["total"] / now.day if now.day else 0
+    lines = [f"📆 *Отчёт за {month_name(now.month)} {now.year}*\n",
+             f"💰 Потрачено: *{fmt(s['total'])} ₴* за {now.day} дней",
+             f"📊 В среднем: *{fmt(avg)} ₴/день*",
+             f"📈 Прогноз: *~{fmt(avg*30)} ₴*\n",
+             "*Топ категории:*"] + _cat_lines(s, 5) + _leak_lines(s)
+    return "\n".join(lines)
+
+def build_comparison() -> str:
+    all_recs = get_all_records()
+    months: dict = {}
+    for r in all_recs:
+        try:
+            d = datetime.strptime(r.get("Дата","")[:10], "%d.%m.%Y")
+            months.setdefault((d.year, d.month), []).append(r)
+        except: pass
+    if len(months) < 2: return "📭 Нужно минимум 2 месяца данных."
+    lines = ["📊 *Сравнение месяцев*\n"]
+    prev_total = None
+    for ym in sorted(months, reverse=True)[:3]:
+        s = analyze_records(months[ym])
+        name = f"{month_name(ym[1])} {ym[0]}"
+        if prev_total:
+            diff = int((s["total"] - prev_total) / prev_total * 100)
+            arrow = "📈" if diff > 0 else "📉"
+            lines.append(f"*{name}*: {fmt(s['total'])} ₴ {arrow} {'+' if diff>0 else ''}{diff}%")
+        else:
+            lines.append(f"*{name}*: {fmt(s['total'])} ₴")
+        if s["by_category"]:
+            tc = max(s["by_category"], key=s["by_category"].get)
+            lines.append(f"  └ Топ: {get_category_emoji(tc)} {tc} — {fmt(s['by_category'][tc])} ₴")
+        prev_total = s["total"]
+    return "\n".join(lines)
+
+async def build_past_self_ai(chat_id) -> str:
+    all_recs = get_all_records()
+    now = datetime.now()
+    def ms(ago):
+        t = now.replace(day=1)
+        for _ in range(ago): t = (t - timedelta(days=1)).replace(day=1)
+        return analyze_records(records_for_month(t.month, t.year, all_recs)), t
+    cur = analyze_records(get_current_month_records())
+    if not cur: return "📭 Недостаточно данных — запиши хотя бы несколько трат."
+    data_lines = [f"Текущий месяц ({month_name(now.month)}): {fmt(cur['total'])} ₴"]
+    cats_cur = ", ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(cur["by_category"].items(), key=lambda x:-x[1])[:5])
+    data_lines.append(f"Категории: {cats_cur}")
+    history_parts = []
+    for ago, label in [(1,"1 месяц назад"),(2,"2 месяца назад"),(3,"3 месяца назад")]:
+        s, t = ms(ago)
+        if not s: continue
+        diff = int((cur["total"] - s["total"]) / s["total"] * 100) if s["total"] else 0
+        history_parts.append(f"{month_name(t.month)}: {fmt(s['total'])} ₴ ({'+' if diff>0 else ''}{diff}% vs сейчас)")
+        cats_h = ", ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1])[:3])
+        history_parts.append(f"  категории: {cats_h}")
+    if not history_parts: return "📭 Нужно минимум 2 месяца данных для сравнения."
+    data_lines += ["", "История:"] + history_parts
+    prompt = f"""Ты финансовый аналитик. Проанализируй динамику трат пользователя.
+
+ДАННЫЕ:
+{chr(10).join(data_lines)}
+
+Напиши анализ:
+- Заголовок 🪞 *Сравнение с прошлым «я»*
+- 2-3 конкретных наблюдения с цифрами
+- 1 короткий вывод или совет
+- Тон: дружелюбный, без воды, с эмодзи
+- Длина: 5-8 строк"""
+    messages = [{"role":"system","content":"Отвечай только на русском. Markdown через *. Без лишних слов."},
+                {"role":"user","content":prompt}]
+    try:
+        return groq_chat(messages, max_tokens=400)
+    except:
+        lines = ["🪞 *Сравнение с прошлым «я»*\n"]
+        for ago, label in [(1,"1 мес"),(2,"2 мес"),(3,"3 мес")]:
+            s, t = ms(ago)
+            if not s: continue
+            diff = int((cur["total"] - s["total"]) / s["total"] * 100)
+            sign = "+" if diff > 0 else ""
+            lines.append(f"{'📈' if diff>0 else '📉'} *{label} назад* ({month_name(t.month)}): {sign}{diff}%")
+        return "\n".join(lines)
+
+async def build_habits_ai() -> str:
+    all_recs = get_all_records()
+    months: dict = {}
+    for r in all_recs:
+        try:
+            d = datetime.strptime(r.get("Дата","")[:10], "%d.%m.%Y")
+            months.setdefault((d.year, d.month), []).append(r)
+        except: pass
+    if not months: return "📭 Недостаточно данных."
+    n = max(len(months), 1)
+    desc_data: dict = defaultdict(lambda: {"total":0.0,"count":0,"months":set()})
+    for ym, recs in months.items():
+        sk = get_sum_key(recs)
+        for r in recs:
+            desc = r.get("Описание","").lower().strip()
+            amt = float(r[sk]) if r.get(sk) else 0
+            if desc and amt:
+                desc_data[desc]["total"] += amt
+                desc_data[desc]["count"] += 1
+                desc_data[desc]["months"].add(ym)
+    habits = {k:v for k,v in desc_data.items() if len(v["months"])>=2 and v["total"]/n>=200}
+    if not habits: return "📭 Пока мало данных. Записывай траты несколько недель — и я найду паттерны!"
+    habits_text = []
+    for desc, d in sorted(habits.items(), key=lambda x:-x[1]["total"])[:8]:
+        monthly = d["total"] / n
+        annual = monthly * 12
+        habits_text.append(f"- {desc}: {fmt(monthly)}₴/мес, {fmt(annual)}₴/год ({d['count']} раз)")
+    prompt = f"""Ты финансовый аналитик. Проанализируй регулярные траты.
+
+ПРИВЫЧКИ:
+{chr(10).join(habits_text)}
+
+Напиши анализ:
+- Заголовок 💸 *Стоимость привычек*
+- Для каждой: сумма/мес и /год, сравнение с чем-то ("это = 3 поездки в кино")
+- Выдели 1-2 где можно сэкономить
+- Тон: без осуждения, с юмором, с эмодзи
+- Компактно, без воды"""
+    messages = [{"role":"system","content":"Отвечай только на русском. Markdown через *. Кратко."},
+                {"role":"user","content":prompt}]
+    try:
+        return groq_chat(messages, max_tokens=500)
+    except:
+        lines = ["💸 *Стоимость привычек*\n"]
+        for desc, d in sorted(habits.items(), key=lambda x:-x[1]["total"])[:6]:
+            monthly = d["total"] / n
+            annual = monthly * 12
+            equiv = next((label for thr,label in EQUIVALENTS if annual>=thr*0.7), None)
+            lines += [f"*{desc.capitalize()}*", f"  📅 {fmt(monthly)} ₴/мес · 📆 {fmt(annual)} ₴/год"]
+            if equiv: lines.append(f"  💡 = {equiv}")
+            lines.append("")
+        return "\n".join(lines)
+
+async def build_advice_ai(chat_id) -> str:
+    recs = get_current_month_records()
+    if not recs or len(recs) < 3:
+        return "📭 Маловато данных — запиши хотя бы 5-10 трат."
+    s = analyze_records(recs)
+    now = datetime.now()
+    avg = s["total"] / now.day if now.day else 0
+    bs = get_budget_status(chat_id)
+    sal = get_salary_info(chat_id)
+    cats = ", ".join(f"{c}: {fmt(a)}₴ ({int(a/s['total']*100)}%)"
+                     for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1]))
+    budget_info = f"Бюджет: {fmt(bs['budget'])}₴, использовано {bs['percent']}%, осталось {fmt(bs['left'])}₴" if bs else "бюджет не установлен"
+    salary_info = f"Зарплата: {sal.get('amount','?')}₴, {sal['day']}-е число" if sal else "зарплата не указана"
+    leaks = ", ".join(f"{k} ({v['count']}×={fmt(v['total'])}₴)"
+                      for k,v in list(s.get("leaks",{}).items())[:3])
+    goals_info = ", ".join(f"{g['name']}: {fmt(g['saved'])}/{fmt(g['target'])}₴"
+                           for g in goals.values()) or "нет"
+    prompt = f"""Ты личный финансовый советник. Дай конкретные советы.
+
+ДАННЫЕ за {month_name(now.month)}:
+- Потрачено: {fmt(s['total'])}₴ за {now.day} дней, среднее {fmt(avg)}₴/день
+- Прогноз на месяц: {fmt(avg*30)}₴
+- Категории: {cats}
+- {budget_info}
+- {salary_info}
+- Частые траты: {leaks or 'нет'}
+- Цели: {goals_info}
+
+Напиши 3-4 совета:
+- Заголовок 💡 *Персональные советы*
+- Каждый совет с конкретной цифрой
+- Если есть цели — как быстрее накопить
+- Тон: дружелюбный, практичный, без банальщины"""
+    messages = [{"role":"system","content":"Отвечай только на русском. Markdown через *. Конкретные цифры важны."},
+                {"role":"user","content":prompt}]
+    try:
+        return groq_chat(messages, max_tokens=500)
+    except:
+        return build_advice_fallback(recs)
+
 async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data or {}
     did = data.get("debt_id")
