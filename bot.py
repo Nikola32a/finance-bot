@@ -1368,7 +1368,7 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         if not expenses: return "🤔 Не понял сумму. Например: «Кофе 85»"
         date = datetime.now().strftime("%d.%m.%Y %H:%M")
         month_recs = get_current_month_records()
-        lines = ["✅ *Записано!*\n"]
+        saved_rows = []
         for exp in expenses:
             amount = float(str(exp.get("amount",0)).replace(",","."))
             if amount <= 0: continue
@@ -1376,22 +1376,46 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
             desc = exp.get("description","—")
             emoji = exp.get("emoji","")
             save_expense(date, amount, cat, desc, text)
-            lines.append(f"{emoji} *{desc}* — *{fmt(amount)} ₴*\n   _{get_category_emoji(cat)} {cat}_")
-        if len(expenses) > 1:
-            total = sum(float(str(e.get("amount",0)).replace(",",".")) for e in expenses)
-            lines.append(f"\n💰 *Итого: {fmt(total)} ₴*")
-        cat0 = fix_cat(expenses[0].get("category","Другое"))
+            saved_rows.append({"amount": amount, "cat": cat, "desc": desc, "emoji": emoji})
+        if not saved_rows: return "🤔 Не понял сумму. Например: «Кофе 85»"
+
+        lines = ["✅ *Записано!*", "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"]
+        for row in saved_rows:
+            cat_emoji = get_category_emoji(row["cat"])
+            lines.append(f"{row['emoji'] or cat_emoji} *{row['desc']}*")
+            lines.append(f"   💳 *{fmt(row['amount'])} ₴*  ·  {cat_emoji} _{row['cat']}_")
+        if len(saved_rows) > 1:
+            total = sum(r["amount"] for r in saved_rows)
+            lines.append("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄")
+            lines.append(f"💰 *Итого: {fmt(total)} ₴*")
+
+        lines.append("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄")
+        cat0 = saved_rows[0]["cat"]
         sk = get_sum_key(month_recs)
         cat_total = sum(float(r[sk]) for r in month_recs if fix_cat(r.get("Категория",""))==cat0 and r.get(sk))
+        cat_total += sum(r["amount"] for r in saved_rows if r["cat"] == cat0)
         if cat_total > 0:
-            lines.append(f"\n_{get_category_emoji(cat0)} {cat0} за месяц: *{fmt(cat_total)} ₴*_")
+            lines.append(f"📊 _{get_category_emoji(cat0)} {cat0} за месяц: *{fmt(cat_total)} ₴*_")
+
         bs = get_budget_status(chat_id)
         if bs:
             pct = bs["percent"]
-            if pct >= 90: lines.append(f"\n🔴 *Бюджет на {pct}%!*")
-            elif pct >= 70: lines.append(f"\n🟡 Бюджет на {pct}%")
+            bar_filled = int(pct / 10)
+            bar = "█" * bar_filled + "░" * (10 - bar_filled)
+            if pct >= 90:
+                lines.append(f"🔴 *Бюджет [{bar}] {pct}%*")
+            elif pct >= 70:
+                lines.append(f"🟡 Бюджет [{bar}] {pct}%")
+            else:
+                lines.append(f"🟢 Бюджет [{bar}] {pct}%")
+
         set_ctx(chat_id, last_action="expense")
-        return "\n".join(lines)
+        msg_text = "\n".join(lines)
+        undo_kb = inline_kb([[("🗑 Отменить запись", "undo_last_expense")]])
+        if update and hasattr(update, "message") and update.message:
+            await update.message.reply_text(msg_text, parse_mode="Markdown", reply_markup=undo_kb)
+            return None
+        return msg_text
 
     # ── УДАЛИТЬ ТРАТУ ──
     elif action == "expense_delete":
@@ -1913,6 +1937,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("💰 Финансы","menu_stats"),("📊 Аналитика","menu_week")],
             [("💸 Долги","show_debts"),("🎯 Цели","back_goals")],
         ])); return
+
+    # ── ОТМЕНИТЬ ПОСЛЕДНЮЮ ТРАТУ ──
+    if data == "undo_last_expense":
+        try:
+            all_recs = get_all_records()
+            sh = get_sheet()
+            if not all_recs:
+                await query.edit_message_text("🤔 Записей нет.")
+                return
+            last = all_recs[-1]
+            row_idx = len(all_recs) + 1  # +1 за заголовок
+            sk = get_sum_key(all_recs)
+            desc = last.get("Описание", "?")
+            amount = last.get(sk, "?")
+            cat = last.get("Категория", "?")
+            sh.delete_rows(row_idx)
+            _invalidate("sheet1")
+            await query.edit_message_text(
+                f"🗑 *Запись удалена*\n"
+                f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+                f"{get_category_emoji(cat)} *{desc}* — *{fmt(float(amount))} ₴*\n"
+                f"_{cat}_",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"undo_last_expense: {e}")
+            await query.edit_message_text("❌ Не удалось удалить запись.")
+        return
 
 # ── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
