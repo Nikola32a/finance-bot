@@ -512,28 +512,31 @@ async def fetch_obmen_rates():
     num_pat = re.compile(r"(\d{2,3}[.,]\d{1,4})")
 
     def _extract_two_rates(chunk: str):
-        """
-        Из куска HTML вытаскивает 2 ближайших валидных числа (курс покупки/продажи)
-        """
-        nums = []
-        for n in num_pat.findall(chunk):
-            try:
-                val = float(n.replace(",", "."))
-                if 30 < val < 200:
-                    nums.append(val)
-            except:
-                continue
+    nums = []
+    for n in num_pat.findall(chunk):
+        try:
+            val = float(n.replace(",", "."))
+            if 30 < val < 200:
+                nums.append(val)
+        except Exception:
+            continue
 
-        # Убираем подряд идущие дубликаты
-        cleaned = []
-        for x in nums:
-            if not cleaned or abs(cleaned[-1] - x) > 0.001:
-                cleaned.append(x)
+    # Убираем подряд идущие дубликаты
+    cleaned = []
+    for x in nums:
+        if not cleaned or abs(cleaned[-1] - x) > 0.001:
+            cleaned.append(x)
 
-        if len(cleaned) >= 2:
-            return {"buy": cleaned[0], "sale": cleaned[1]}
+    if len(cleaned) >= 2:
+        a, b = cleaned[0], cleaned[1]
 
-        return None
+        # Для обменников покупка обычно меньше продажи
+        buy = min(a, b)
+        sale = max(a, b)
+
+        return {"buy": buy, "sale": sale}
+
+    return None
 
     def _parse_rates_from_html(html: str) -> dict:
         result = {}
