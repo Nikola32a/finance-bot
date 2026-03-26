@@ -437,7 +437,7 @@ _rates_cache: dict = {}
 _rates_ts: float = 0
 _mono_cache: dict = {}
 _mono_ts: float = 0
-_obmen_cache: dict = {}
+_obmen_cache: dict = None
 _obmen_ts: float = 0
 
 async def fetch_nbu_rates() -> dict:
@@ -488,13 +488,13 @@ async def fetch_monobank_rates() -> dict:
 _obmen_cache = None
 _obmen_ts = 0
 
-async def fetch_obmen_rates() -> dict:
-   """Курс обменників через API obmen24"""
-global _obmen_cache, _obmen_ts
-now_ts = datetime.now(KYIV_TZ).timestamp()
+async def fetch_obmen_rates():
+    global _obmen_cache, _obmen_ts
 
-if _obmen_cache and now_ts - _obmen_ts < 600:
-    return _obmen_cache
+    now_ts = datetime.now(KYIV_TZ).timestamp()
+
+    if _obmen_cache and now_ts - _obmen_ts < 600:
+        return _obmen_cache
 
 try:
     async with httpx.AsyncClient(timeout=10) as client:
