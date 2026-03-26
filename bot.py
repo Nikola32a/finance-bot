@@ -85,6 +85,7 @@ def _worksheet_get_or_create(sp, name):
     try: return sp.worksheet(name)
     except: return sp.add_worksheet(title=name, rows=200, cols=10)
 
+def _invalidate(name="sheet1"):
     _records_cache.pop(name, None)
 
 def _cached_records(name="sheet1") -> list:
