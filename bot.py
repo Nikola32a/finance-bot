@@ -616,7 +616,198 @@ def build_debts_msg() -> str:
                 lines.append(f"💰 Итого в {sym}: *{fmt(totals[cur])} {sym}*")
     return "\n".join(lines)
 
-async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
+# ── GROQ / LLM ───────────────────────────────────────────────────────────────
+def transcribe(path: str) -> str:
+    with open(path, "rb") as f:
+        return groq_client.audio.transcriptions.create(
+            model="whisper-large-v3", file=f, language="ru").text
+
+def _llm(messages: list, max_tokens=600, temperature=0.0) -> str:
+    r = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    return r.choices[0].message.content.strip()
+
+def groq_chat(messages: list, max_tokens=800) -> str:
+    return _llm(messages, max_tokens=max_tokens, temperature=0.7)
+
+def _extract_json(raw: str, bracket="[") -> str:
+    close = "]" if bracket == "[" else "}"
+    raw = raw.replace("```json","").replace("```","").strip()
+    s = raw.find(bracket)
+    if s == -1: return raw
+    depth = 0
+    for i, ch in enumerate(raw[s:], start=s):
+        if ch == bracket: depth += 1
+        elif ch == close:
+            depth -= 1
+            if depth == 0:
+                return raw[s:i+1]
+    return raw[s:]
+
+# ── УМНЫЙ ПАРСЕР ТРАТ ────────────────────────────────────────────────────────
+PARSE_SYSTEM = """Ты — парсер финансовых записей. Извлеки ВСЕ траты из сообщения.
+
+КАТЕГОРИИ:
+- "Еда / продукты" — еда, напитки, рестораны, кафе, доставка, магазины, алкоголь
+- "Транспорт" — бензин, заправки, такси, парковка, мойка, СТО, метро, автобус
+- "Развлечения" — игры, кино, стриминг, подписки, ставки, боулинг, концерты
+- "Здоровье / аптека" — лекарства, аптека, врачи, массаж, парикмахер, маникюр, спортзал
+- "Никотин" — сигареты, снюс, вейп, кальян, ZYN, VELO
+- "Другое" — одежда, техника, коммунальные, интернет, телефон, подарки, ремонт
+
+ПРАВИЛА:
+1. Ищи ВСЕ суммы — "потратил", "заплатил", "купил", "вышло"
+2. Понимай сленг: "шаурма 120", "синька 200", "ашан 3к"
+3. "к"/"тыс" = тысячи: "3к"=3000, "1.5к"=1500
+4. Несколько трат через запятую/и — отдельный объект для каждой
+5. "закинул на карту 500" — НЕ трата, пропусти
+6. emoji — подходящий эмодзи для описания
+
+ТОЛЬКО JSON массив:
+[{"amount":<число>,"category":"<категория>","description":"<2-4 слова>","emoji":"<эмодзи>"}]"""
+
+PARSE_EXAMPLES = [
+    {"role":"user","content":"снюс 800"},
+    {"role":"assistant","content":'[{"amount":800,"category":"Никотин","description":"снюс","emoji":"🚬"}]'},
+    {"role":"user","content":"зашёл в атб, взял еды, вышло 340"},
+    {"role":"assistant","content":'[{"amount":340,"category":"Еда / продукты","description":"ATБ продукты","emoji":"🛒"}]'},
+    {"role":"user","content":"мойка 350, залил бензин 1200"},
+    {"role":"assistant","content":'[{"amount":350,"category":"Транспорт","description":"мойка машины","emoji":"🚿"},{"amount":1200,"category":"Транспорт","description":"бензин","emoji":"⛽"}]'},
+    {"role":"user","content":"купил кроссовки 2к и носки 150"},
+    {"role":"assistant","content":'[{"amount":2000,"category":"Другое","description":"кроссовки","emoji":"👟"},{"amount":150,"category":"Другое","description":"носки","emoji":"🧦"}]'},
+    {"role":"user","content":"netflix 199, spotify 99"},
+    {"role":"assistant","content":'[{"amount":199,"category":"Развлечения","description":"Netflix","emoji":"🎬"},{"amount":99,"category":"Развлечения","description":"Spotify","emoji":"🎵"}]'},
+    {"role":"user","content":"сколько я потратил?"},
+    {"role":"assistant","content":'[]'},
+    {"role":"user","content":"пополнил счёт 500"},
+    {"role":"assistant","content":'[]'},
+]
+
+def parse_expenses(text: str) -> list:
+    user_cats = _user_categories
+    system = PARSE_SYSTEM
+    if user_cats:
+        system += f"\n\nДОПОЛНИТЕЛЬНЫЕ КАТЕГОРИИ: {', '.join(user_cats)}"
+    messages = [{"role":"system","content":system}]
+    messages.extend(PARSE_EXAMPLES)
+    messages.append({"role":"user","content":text})
+    try:
+        raw = _llm(messages, max_tokens=500, temperature=0.0)
+        raw = _extract_json(raw, "[")
+        result = json.loads(raw)
+        if isinstance(result, dict): result = [result]
+        validated = []
+        for item in result:
+            try:
+                amt = float(str(item.get("amount","0")).replace(",","."))
+                if amt <= 0: continue
+                item["amount"] = amt
+                item["category"] = fix_cat(item.get("category","Другое"))
+                validated.append(item)
+            except: continue
+        return validated
+    except Exception as e:
+        logger.error(f"parse_expenses error: {e}")
+        nums = re.findall(r'\b\d+(?:[.,]\d+)?\b', text)
+        if nums:
+            try:
+                return [{"amount": float(nums[0].replace(",",".")), "category": "Другое",
+                         "description": text[:40], "emoji": "📦"}]
+            except: pass
+        return []
+
+# ── ФИНАНСОВЫЙ КОНТЕКСТ ДЛЯ ИИ ───────────────────────────────────────────────
+def get_financial_context(chat_id) -> str:
+    recs = get_current_month_records()
+    s = analyze_records(recs)
+    bs = get_budget_status(chat_id)
+    sal = get_salary_info(chat_id)
+    parts = [f"Сегодня: {datetime.now().strftime('%d.%m.%Y')}"]
+    if s:
+        parts.append(f"Траты за {month_name(datetime.now().month)}: {fmt(s['total'])} ₴")
+        cats = "; ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1])[:4])
+        parts.append(f"Категории: {cats}")
+    if bs:
+        parts.append(f"Бюджет: {fmt(bs['budget'])}₴, использовано {bs['percent']}%, осталось {fmt(bs['left'])}₴")
+    if sal:
+        parts.append(f"Зарплата: {sal.get('amount','?')}₴, {sal['day']}-е число")
+    if debts:
+        dl = "; ".join(f"{d['name']}: {format_amounts(d['amounts']).replace('*','')}" for d in list(debts.values())[:3])
+        parts.append(f"Долги: {dl}")
+    if goals:
+        gl = "; ".join(f"{g['name']}: {fmt(g['saved'])}/{fmt(g['target'])}₴" for g in list(goals.values())[:3])
+        parts.append(f"Цели: {gl}")
+    return "\n".join(parts)
+
+# ── ИИ ЧАТ С ПАМЯТЬЮ ─────────────────────────────────────────────────────────
+_ai_chat_history: dict = {}
+
+async def ai_chat_response(chat_id, user_message: str) -> str:
+    if chat_id not in _ai_chat_history:
+        _ai_chat_history[chat_id] = []
+    history = _ai_chat_history[chat_id]
+    financial_ctx = get_financial_context(chat_id)
+    system = f"""Ты умный финансовый ИИ-ассистент. Отвечай кратко и по делу (3-5 предложений).
+Используй данные пользователя. Будь дружелюбным, с эмодзи. Отвечай на русском/украинском.
+
+ДАННЫЕ ПОЛЬЗОВАТЕЛЯ:
+{financial_ctx}"""
+    messages = [{"role":"system","content":system}]
+    messages.extend(history[-10:])
+    messages.append({"role":"user","content":user_message})
+    try:
+        response = groq_chat(messages, max_tokens=600)
+        history.append({"role":"user","content":user_message})
+        history.append({"role":"assistant","content":response})
+        if len(history) > 20:
+            _ai_chat_history[chat_id] = history[-20:]
+        return response
+    except Exception as e:
+        logger.error(f"ai_chat: {e}")
+        return "🤔 Не могу ответить сейчас. Попробуй чуть позже!"
+
+# ── ЗАПАСНЫЕ ФУНКЦИИ АНАЛИТИКИ ────────────────────────────────────────────────
+def build_advice_fallback(records: list) -> str:
+    if not records: return ""
+    s = analyze_records(records)
+    if not s: return ""
+    total = s["total"]
+    bc = s["by_category"]
+    tips = []
+    food = bc.get("Еда / продукты", 0)
+    if food > total * 0.35:
+        tips.append(f"🍔 На еду {int(food/total*100)}%. −25% = *+{fmt(food*0.25)} ₴/мес*")
+    nic = bc.get("Никотин", 0)
+    if nic > 500:
+        tips.append(f"🚬 Никотин: *{fmt(nic)} ₴/мес* = *{fmt(nic*12)} ₴/год*")
+    if not tips: return "💡 Трать осознанно!"
+    return "💡 *Советы:*\n" + "\n".join(f"{i}. {t}" for i,t in enumerate(tips,1))
+
+def build_insight() -> str:
+    recs = get_week_records()
+    month_recs = get_current_month_records()
+    if not recs: return "📭 За эту неделю данных нет."
+    s = analyze_records(recs)
+    lines = ["🧠 *Инсайт недели*\n"]
+    if s["by_day"]:
+        td = max(s["by_day"], key=s["by_day"].get)
+        avg = s["total"] / 7
+        if s["by_day"][td] > avg * 1.5:
+            lines.append(f"📅 Дорогой день: *{td}* (+{int(s['by_day'][td]/avg*100-100)}% от среднего)")
+    if s["by_category"]:
+        tc = max(s["by_category"], key=s["by_category"].get)
+        pct = int(s["by_category"][tc] / s["total"] * 100)
+        lines.append(f"{get_category_emoji(tc)} Топ: *{tc}* — {pct}%")
+    if month_recs:
+        ms_data = analyze_records(month_recs)
+        avg_day = ms_data["total"] / datetime.now().day
+        lines.append(f"📈 Прогноз месяца: *~{fmt(avg_day*30)} ₴*")
+    lines.append(f"\n💰 За неделю: *{fmt(s['total'])} ₴* ({s['count']} записей)")
+    return "\n".join(lines)
     data = context.job.data or {}
     did = data.get("debt_id")
     cid = data.get("chat_id") or CHAT_ID
