@@ -495,7 +495,7 @@ async def fetch_obmen_rates() -> dict:
     # Ключові слова для пошуку валюти в HTML (обмінник може писати EUR як € або Euro)
     SEARCH_KEYS = {
         "USD": ["USD", "Долар", "Dollar", "$"],
-        "EUR": ["EUR", "Євро", "Euro", "€"],
+        "EUR": ["EUR", "Євро", "Euro", "€", "EUR/UAH"],
     }
     def _parse_rates_from_html(html: str) -> dict:
         result = {}
@@ -562,7 +562,7 @@ async def build_rates_msg() -> str:
         ob  = v(ob_d,   "buy");      os_ = v(ob_d,   "sale")
         lines.append(
             f"{flag} *{cur}*\n"
-            f"`{'':1}{'':7}{'Моно':>7}  {'obmen24':>7}`\n"
+            f"`{'':1}{'':7}{'Моно':>6}  {'obmen24':>7}`\n"
             f"`{'':1}{'Купить':<7}{mb:>7}  {ob:>7}`\n"
             f"`{'':1}{'Продать':<7}{ms:>7}  {os_:>7}`"
         )
