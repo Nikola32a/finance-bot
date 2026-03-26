@@ -432,7 +432,7 @@ def build_goals_msg() -> str:
         lines.append("")
     return "\n".join(lines)
 
-# ── КУРС ВАЛЮТ НБУ (USD = obmen24, EUR = Privat) ─────────────────────────────
+# ── КУРС ВАЛЮТ НБУ (USD: obmen24 -> fallback Privat, EUR: Privat) ────────────
 _rates_cache: dict = {}
 _rates_ts: float = 0
 _mono_cache: dict = {}
@@ -459,12 +459,14 @@ async def fetch_nbu_rates() -> dict:
         logger.error(f"NBU rates: {e}")
         return {"USD": 41.5, "EUR": 44.0}
 
+
 async def convert_to_uah(amount: float, currency: str) -> float:
     if currency == "UAH":
         return amount
     rates = await fetch_nbu_rates()
     rate = rates.get(currency, 1.0)
     return amount * rate
+
 
 async def fetch_monobank_rates() -> dict:
     global _mono_cache, _mono_ts
@@ -475,6 +477,7 @@ async def fetch_monobank_rates() -> dict:
         async with httpx.AsyncClient(timeout=8) as client:
             resp = await client.get("https://api.monobank.ua/bank/currency")
             data = resp.json()
+
             result = {}
             for item in data:
                 if item.get("currencyCodeB") == 980:
@@ -483,6 +486,7 @@ async def fetch_monobank_rates() -> dict:
                         result["USD"] = item
                     elif code_a == 978:
                         result["EUR"] = item
+
             _mono_cache = result
             _mono_ts = now
             return result
@@ -490,8 +494,12 @@ async def fetch_monobank_rates() -> dict:
         logger.error(f"monobank rates: {e}")
         return {}
 
+
 async def fetch_obmen_rates() -> dict:
-    """Курс обменників з obmen24.com.ua/uk/lviv (только USD)"""
+    """
+    Курс обменников с obmen24.com.ua/uk/lviv
+    Используем ТОЛЬКО USD.
+    """
     global _obmen_cache, _obmen_ts
     now_ts = datetime.now(KYIV_TZ).timestamp()
     if _obmen_cache and now_ts - _obmen_ts < 600:
@@ -499,7 +507,6 @@ async def fetch_obmen_rates() -> dict:
 
     import re as _re
 
-    # Ищем ТОЛЬКО USD
     SEARCH_KEYS = {
         "USD": ["USD", "Долар", "Dollar", "$"],
     }
@@ -522,7 +529,10 @@ async def fetch_obmen_rates() -> dict:
                 ]
 
                 if len(nums) >= 2:
-                    result[cur] = {"buy": nums[0], "sale": nums[1]}
+                    result[cur] = {
+                        "buy": nums[0],
+                        "sale": nums[1]
+                    }
                     break
 
         return result
@@ -532,7 +542,11 @@ async def fetch_obmen_rates() -> dict:
             resp = await client.get(
                 "https://obmen24.com.ua/uk/lviv",
                 headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0"
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0 Safari/537.36"
+                    )
                 }
             )
 
@@ -555,8 +569,14 @@ async def fetch_obmen_rates() -> dict:
         logger.error(f"obmen24 USD rates: {e}")
         return {}
 
+
 async def fetch_privat_rates() -> dict:
-    """Курс ПриватБанка (используем только EUR)"""
+    """
+    Курс ПриватБанка.
+    Используем:
+    - USD как fallback, если obmen24 не сработал
+    - EUR всегда
+    """
     global _privat_cache, _privat_ts
     now = datetime.now(KYIV_TZ).timestamp()
     if _privat_cache and now - _privat_ts < 600:
@@ -584,6 +604,7 @@ async def fetch_privat_rates() -> dict:
         logger.error(f"privat rates: {e}")
         return {}
 
+
 async def build_rates_msg() -> str:
     nbu, mono, obmen, privat = await asyncio.gather(
         fetch_nbu_rates(),
@@ -602,23 +623,31 @@ async def build_rates_msg() -> str:
     for cur, flag in [("USD", "🇺🇸"), ("EUR", "🇪🇺")]:
         mono_d = mono.get(cur, {})
 
-        # USD -> obmen24
-        # EUR -> Privat
+        # --- Источник для 2-й колонки ---
+        # USD: сначала obmen24, если пусто -> Privat
+        # EUR: всегда Privat
         if cur == "USD":
-            src_d = obmen.get("USD", {})
-            src_name = "obmen24"
+            if "USD" in obmen:
+                src_d = obmen.get("USD", {})
+                src_name = "obmen24"
+            else:
+                src_d = privat.get("USD", {})
+                src_name = "Приват"
         else:
             src_d = privat.get("EUR", {})
             src_name = "Приват"
 
+        # Monobank
         mb = v(mono_d, "rateBuy")
         ms = v(mono_d, "rateSell")
+
+        # 2-я колонка (obmen24 или Privat)
         sb = v(src_d, "buy")
         ss = v(src_d, "sale")
 
         lines.append(
             f"{flag} *{cur}*\n"
-            f"`{'':1}{'':7}{'Моно':>6}  {src_name:>8}`\n"
+            f"`{'':1}{'':7}{'Моно':>6}  {src_name:>9}`\n"
             f"`{'':1}{'Купить':<7}{mb:>7}  {sb:>7}`\n"
             f"`{'':1}{'Продать':<7}{ms:>7}  {ss:>7}`"
         )
