@@ -89,7 +89,7 @@ DEBT_PATTERNS = re.compile(
     # Долговые существительные
     r"|должен|винен|должна|должны|борг|долг"
     # Мне вернули
-    r"|вернул|повернув|віддав|повернув"
+    r"|вернул|вернула|повернув|повернула|віддав|віддала|отдал|отдала"
     # Служебные
     r"|напомни\s+о\s+долг|нагадай\s+про\s+борг"
     r")\b",
@@ -1749,12 +1749,56 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         return msg
 
     elif action == "convert":
-        amount = float(str(route.get("amount",0)).replace(",","."))
-        from_cur = route.get("from_currency","USD").upper()
-        to_cur = route.get("to_currency","UAH").upper()
-        uah = await convert_to_uah(amount, from_cur)
-        sym = CURRENCY_SYMBOLS.get(from_cur, from_cur)
-        return f"💱 *{fmt(amount)} {sym}* = *{fmt(uah)} ₴*\n_(по курсу НБУ)_"
+        amount = float(str(route.get("amount", 0)).replace(",", "."))
+        from_cur = route.get("from_currency", "USD").upper()
+        to_cur = route.get("to_currency", "UAH").upper()
+
+        # Автодетект направления из текста если LLM не разобрался
+        # Примеры: "55 000 в долларах" → UAH→USD, "100 баксів в гривні" → USD→UAH
+        t = text.lower()
+        # Явное "в долларах/евро" без исходной валюты → конвертируем из UAH
+        if re.search(r"\bв\s+(долар\w*|доллар\w*|бакс\w*|usd|\$)", t) and \
+           not re.search(r"долар\w*|доллар\w*|бакс\w*|usd|\$", t.split("в")[0]):
+            from_cur = "UAH"
+            to_cur = "USD"
+        elif re.search(r"\bв\s+(євро\w*|евро\w*|eur\b|€)", t) and \
+             not re.search(r"євро\w*|евро\w*|eur\b|€", t.split("в")[0]):
+            from_cur = "UAH"
+            to_cur = "EUR"
+        # Явное "в гривнях/грн" → конвертируем в UAH
+        elif re.search(r"\bв\s+(гривн\w*|грн\b|₴|uah\b)", t):
+            to_cur = "UAH"
+            # from_cur берём из роутера или определяем из текста
+            if from_cur == "UAH":
+                if re.search(r"долар\w*|доллар\w*|бакс\w*|usd|\$", t):
+                    from_cur = "USD"
+                elif re.search(r"євро\w*|евро\w*|eur\b|€", t):
+                    from_cur = "EUR"
+
+        rates = await fetch_nbu_rates()
+
+        if to_cur == "UAH":
+            # from_cur → UAH
+            rate = rates.get(from_cur, 1.0)
+            result = amount * rate
+            from_sym = CURRENCY_SYMBOLS.get(from_cur, from_cur)
+            return f"💱 *{fmt(amount)} {from_sym}* = *{fmt(result)} ₴*\n_(курс НБУ: {rate:.2f} ₴/{from_sym})_"
+        elif from_cur == "UAH":
+            # UAH → to_cur
+            rate = rates.get(to_cur, 1.0)
+            if rate == 0: return "❌ Не удалось получить курс."
+            result = amount / rate
+            to_sym = CURRENCY_SYMBOLS.get(to_cur, to_cur)
+            return f"💱 *{fmt(amount)} ₴* = *{result:.2f} {to_sym}*\n_(курс НБУ: {rate:.2f} ₴/{to_sym})_"
+        else:
+            # from_cur → UAH → to_cur (кросс-курс)
+            rate_from = rates.get(from_cur, 1.0)
+            rate_to = rates.get(to_cur, 1.0)
+            uah = amount * rate_from
+            result = uah / rate_to if rate_to else 0
+            from_sym = CURRENCY_SYMBOLS.get(from_cur, from_cur)
+            to_sym = CURRENCY_SYMBOLS.get(to_cur, to_cur)
+            return f"💱 *{fmt(amount)} {from_sym}* = *{result:.2f} {to_sym}*\n_(через гривну по курсу НБУ)_"
 
     elif action == "category_add":
         name = route.get("name","").strip().capitalize()
@@ -2115,7 +2159,7 @@ def main():
         app.job_queue.run_daily(send_weekly_insight, time=dtime(19,0), days=(4,), data={"chat_id":CHAT_ID})
         app.job_queue.run_daily(send_morning_briefing, time=dtime(9,0), data={"chat_id":CHAT_ID})
 
-    logger.info("AI-агент запущен! v5.6 🤖")
+    logger.info("AI-агент запущен! v5.7 🤖")
     app.run_polling()
 
 if __name__ == "__main__":
