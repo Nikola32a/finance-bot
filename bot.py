@@ -105,7 +105,15 @@ CURRENCY_AMOUNT_PATTERNS = re.compile(
 )
 
 def _detect_currency(text: str) -> str:
+    """
+    Определяет валюту из текста.
+    UAH-паттерн имеет НАИВЫСШИЙ приоритет:
+    'гривен/гривень/грн/₴' — однозначно UAH, даже если рядом есть слово 'доллар'.
+    """
     t = text.lower()
+    # Сначала проверяем явное упоминание гривны — приоритет над всем
+    if re.search(r"гривн\w*|гривень|грн\b|₴|uah\b", t):
+        return "UAH"
     if re.search(r"долар\w*|доллар\w*|бакс\w*|usd|\$", t):
         return "USD"
     if re.search(r"євро\w*|евро\w*|eur\b|€", t):
@@ -2107,7 +2115,7 @@ def main():
         app.job_queue.run_daily(send_weekly_insight, time=dtime(19,0), days=(4,), data={"chat_id":CHAT_ID})
         app.job_queue.run_daily(send_morning_briefing, time=dtime(9,0), data={"chat_id":CHAT_ID})
 
-    logger.info("AI-агент запущен! v5.5 🤖")
+    logger.info("AI-агент запущен! v5.6 🤖")
     app.run_polling()
 
 if __name__ == "__main__":
