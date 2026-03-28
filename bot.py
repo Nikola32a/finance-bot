@@ -54,7 +54,7 @@ EQUIVALENTS = [
 
 DAYS_LABELS = {1:"1 день",3:"3 дня",7:"1 неделю",14:"2 недели",21:"3 недели",30:"1 месяц"}
 
-# ── FIX: паттерны НЕ-трат — пополнение счёта, переводы и т.п. ──────────────
+# ── паттерны НЕ-трат — пополнение счёта, переводы и т.п. ───────────────────
 NON_EXPENSE_PATTERNS = re.compile(
     r"(пополн|поповн|закинул|закинув|перевод|переказ|transfer|зарядил|зачислен|поступил"
     r"|пришло|получил|отримав|дохід|доход|зарплат|salary"
@@ -70,6 +70,25 @@ DEBT_PATTERNS = re.compile(
     r"|напомни\s+о\s+долг|нагадай\s+про\s+борг)",
     re.IGNORECASE
 )
+
+# Паттерны валют — сумма + валюта или «X в долларах/евро» → уходит в LLM
+# Покрывает: "55000 usd", "100 баксів", "55 000 в долларах", "500 в євро"
+CURRENCY_AMOUNT_PATTERNS = re.compile(
+    r"(\d[\d\s,\.]*)\s*"
+    r"(долар\w*|доллар\w*|бакс\w*|usd|\$|євро\w*|евро\w*|eur|€|фунт\w*|gbp|злот\w*|pln)"
+    r"|\bв\s+(долар\w*|доллар\w*|бакс\w*|usd|євро\w*|евро\w*|eur|фунт\w*|gbp|злот\w*|pln)\b",
+    re.IGNORECASE
+)
+
+# Определение валюты из текста
+def _detect_currency(text: str) -> str:
+    """Определяет валюту из текста. Возвращает 'USD', 'EUR' или 'UAH'."""
+    t = text.lower()
+    if re.search(r"долар\w*|доллар\w*|бакс\w*|usd|\$", t):
+        return "USD"
+    if re.search(r"євро\w*|евро\w*|eur\b|€", t):
+        return "EUR"
+    return "UAH"
 
 # ── GOOGLE SHEETS — единый клиент с кэшем ────────────────────────────────────
 _gs_client = None
@@ -1420,6 +1439,12 @@ def _regex_route(text: str) -> list | None:
         logger.info(f"RegexRouter: пропуск (долг) '{t[:50]}'")
         return None
 
+    # Валютные суммы (доллары/евро/баксы) → LLM разберёт контекст
+    # Например: "55 000 в долларах", "100 баксів", "55000 usd"
+    if CURRENCY_AMOUNT_PATTERNS.search(t):
+        logger.info(f"RegexRouter: пропуск (валюта) '{t[:50]}'")
+        return None
+
     # ── Зарплата ────────────────────────────────────────────────────────────
     m = re.search(
         r"зарплат[аы]?\s+(\d{1,2})[-\s]?(?:го|числа|ого)?\s+(\d[\d\s.,]*(?:\s*к)?)"
@@ -1550,6 +1575,11 @@ question: {{"action":"question","text":"T"}}
 - "закинул/пополнил/поповнив счет/рахунок/карту" — НЕ трата, action="question" с пояснением
 - "дал/дав/позичив Имя сумма" — ВСЕГДА debt_new, НЕ expense
 - "вернул/повернув Имя сумма" — ВСЕГДА debt_return
+- Суммы с валютой (долларах/баксах/евро/usd/eur/$) — смотри на контекст:
+  * если последнее действие debt_new/debt_add → это debt_add с нужной currency
+  * если имя присутствует → debt_new с currency=USD/EUR
+  * иначе → convert
+- НИКОГДА не пиши currency="UAH" если написано долларах/баксах/usd/$
 {{"actions": [...]}}"""
 
 async def route_message(text: str, chat_id, conv_ctx: dict) -> list:
@@ -1587,6 +1617,18 @@ async def route_message(text: str, chat_id, conv_ctx: dict) -> list:
         {"role": "assistant", "content": '{"actions":[{"action":"question","text":"Пополнение карты — это не трата, ничего не записал."}]}'},
         {"role": "user", "content": "вернул Саша 300"},
         {"role": "assistant", "content": '{"actions":[{"action":"debt_return","name":"Саша","amount":300,"currency":"UAH"}]}'},
+        {"role": "user", "content": "дал папе 55000 долларов"},
+        {"role": "assistant", "content": '{"actions":[{"action":"debt_new","name":"Папа","amounts":[{"amount":55000,"currency":"USD"}],"note":""}]}'},
+        {"role": "user", "content": "папа долг 55000 в баксах"},
+        {"role": "assistant", "content": '{"actions":[{"action":"debt_new","name":"Папа","amounts":[{"amount":55000,"currency":"USD"}],"note":""}]}'},
+        {"role": "user", "content": "55000 в долларах"},
+        {"role": "assistant", "content": '{"actions":[{"action":"convert","amount":55000,"from_currency":"USD","to_currency":"UAH"}]}'},
+        {"role": "user", "content": "ещё 200 долларов папе"},
+        {"role": "assistant", "content": '{"actions":[{"action":"debt_add","name":"Папа","amount":200,"currency":"USD"}]}'},
+        {"role": "user", "content": "папа долг + 55 000 доларів"},
+        {"role": "assistant", "content": '{"actions":[{"action":"debt_add","name":"Папа","amount":55000,"currency":"USD"}]}'},
+        {"role": "user", "content": "папа борг 2000 доларів"},
+        {"role": "assistant", "content": '{"actions":[{"action":"debt_new","name":"Папа","amounts":[{"amount":2000,"currency":"USD"}],"note":""}]}'},
         {"role": "user", "content": text},
     ]
     try:
@@ -1668,6 +1710,12 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
             cur = route.get("currency","UAH")
             if amt: ams = [{"amount":float(amt),"currency":cur}]
         if not name or not ams: return "🤔 Не понял кому и сколько."
+        # FIX: если LLM вернул UAH, но в тексте явно написано о долларах/евро — корректируем
+        detected_cur = _detect_currency(text)
+        if detected_cur != "UAH":
+            for a in ams:
+                if a.get("currency","UAH") == "UAH":
+                    a["currency"] = detected_cur
         existing = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None)
         if existing:
             ex_ams = debts[existing].get("amounts",[])
@@ -1697,7 +1745,11 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
     elif action == "debt_add":
         name = str(route.get("name", conv_ctx.get("last_name",""))).strip().capitalize()
         amount = float(str(route.get("amount",0)).replace(",","."))
+        # FIX: автоопределение валюты из текста если LLM вернул UAH по умолчанию
         currency = route.get("currency","UAH")
+        detected_cur = _detect_currency(text)
+        if detected_cur != "UAH" and currency == "UAH":
+            currency = detected_cur
         did = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None)
         if not did: return f"🤔 Не нашёл долга для *{name}*."
         ex_ams = debts[did].get("amounts",[])
@@ -1706,8 +1758,9 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         else: ex_ams.append({"amount":amount,"currency":currency})
         debts[did]["amounts"] = ex_ams
         update_debt_amounts(did, ex_ams)
+        sym = CURRENCY_SYMBOLS.get(currency, "₴")
         set_ctx(chat_id, last_name=debts[did]["name"], last_action="debt_add")
-        return f"➕ Добавил *{fmt(amount)} ₴* к *{debts[did]['name']}*\n💰 Итого: {format_amounts(ex_ams)}"
+        return f"➕ Добавил *{fmt(amount)} {sym}* к *{debts[did]['name']}*\n💰 Итого: {format_amounts(ex_ams)}"
 
     # ── ВОЗВРАТ ДОЛГА ──
     elif action == "debt_return":
@@ -1717,6 +1770,10 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         d = debts[did]
         ret_amount = route.get("amount")
         currency = route.get("currency","UAH")
+        # FIX: автоопределение валюты из текста
+        detected_cur = _detect_currency(text)
+        if detected_cur != "UAH" and currency == "UAH":
+            currency = detected_cur
         ex_ams = list(d.get("amounts",[]))
         lines = [f"💰 *{d['name']}* вернул:\n"]
         if ret_amount:
@@ -2210,7 +2267,7 @@ def main():
             time=dtime(9, 0),
             data={"chat_id": CHAT_ID})
 
-    logger.info("AI-агент запущен! v5.3 🤖")
+    logger.info("AI-агент запущен! v5.4 🤖")
     app.run_polling()
 
 if __name__ == "__main__":
