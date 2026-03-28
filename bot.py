@@ -1,8 +1,12 @@
 """
-Финансовый AI-агент Telegram бот v5.5
+Финансовый AI-агент Telegram бот v5.7
 Семантика долгов: "дал Саше 500" = Саша должен МНЕ (я дал в долг)
                   "Саша вернул 500" = Саша отдал мне обратно
                   "отдал Саше 500" = НЕ долг, это я заплатил/потратил
+
+ИЗМЕНЕНИЯ v5.7:
+- Просто число без описания (напр. "1650") → бот спрашивает категорию через инлайн-кнопки
+- quick_ callback использует название категории как описание
 """
 import os, logging, tempfile, json, re, asyncio
 from datetime import datetime, timedelta, time as dtime
@@ -66,33 +70,20 @@ NON_EXPENSE_PATTERNS = re.compile(
 )
 
 # ── ДОЛГОВЫЕ ПАТТЕРНЫ ────────────────────────────────────────────────────────
-# СЕМАНТИКА (я — владелец бота, долг = кто-то должен МНЕ):
-#
-#   debt_new  — я дал в долг:   "дал/дав/позичив Имени сумму"
-#                                "Имя борг/долг сумма"
-#                                "Имя должен/винен мне сумму"
-#
-#   debt_return — мне вернули:  "Имя вернул/повернув/отдал мне сумму"
-#                                "Имя погасил долг"
-#
-# ВАЖНО: "отдал Саше" (я отдал) — это НЕ долг и НЕ debt_return,
-#         это скорее трата или ничего. LLM разберётся по контексту.
-#
-# В DEBT_PATTERNS попадают слова, которые ТОЧНО указывают на долг
-# и требуют передачи в LLM (не в regex-трату):
-
 DEBT_PATTERNS = re.compile(
     r"\b("
-    # Я дал в долг
     r"дал|дав|позичив|позычил|одолжил|одолжив|в\s+долг"
     r"|взял\s+у|взяв\s+у"
-    # Долговые существительные
     r"|должен|винен|должна|должны|борг|долг"
-    # Мне вернули
     r"|вернул|вернула|повернув|повернула|віддав|віддала|отдал|отдала"
-    # Служебные
     r"|напомни\s+о\s+долг|нагадай\s+про\s+борг"
     r")\b",
+    re.IGNORECASE
+)
+
+# ── ПАТТЕРН "ПРОСТО ЧИСЛО" ───────────────────────────────────────────────────
+JUST_NUMBER_PATTERN = re.compile(
+    r"^\s*(\d[\d\s]*(?:[.,]\d+)?(?:\s*к(?:р|ривень|уб)?|\s*тис(?:яч)?)?)\s*(?:₴|грн|грн\.?|uah)?\s*$",
     re.IGNORECASE
 )
 
@@ -105,13 +96,7 @@ CURRENCY_AMOUNT_PATTERNS = re.compile(
 )
 
 def _detect_currency(text: str) -> str:
-    """
-    Определяет валюту из текста.
-    UAH-паттерн имеет НАИВЫСШИЙ приоритет:
-    'гривен/гривень/грн/₴' — однозначно UAH, даже если рядом есть слово 'доллар'.
-    """
     t = text.lower()
-    # Сначала проверяем явное упоминание гривны — приоритет над всем
     if re.search(r"гривн\w*|гривень|грн\b|₴|uah\b", t):
         return "UAH"
     if re.search(r"долар\w*|доллар\w*|бакс\w*|usd|\$", t):
@@ -1137,6 +1122,25 @@ REMINDER_KB = inline_kb([
     [("3 недели","reminder_21"),("1 месяц","reminder_30")],
 ])
 
+# ── ВСПОМОГАТЕЛЬНАЯ: клавиатура выбора категории для суммы ──────────────────
+def build_category_kb(amount: float) -> InlineKeyboardMarkup:
+    """Создаёт инлайн-клавиатуру выбора категории для суммы без описания."""
+    cats = get_all_categories()
+    rows = []
+    row = []
+    for i, cat in enumerate(cats):
+        emoji = get_category_emoji(cat)
+        # callback_data: quick_{cat}_{amount}  — cat может содержать пробелы и /
+        # используем индекс категории чтобы не ломать split
+        btn_data = f"qcat_{i}_{amount}"
+        row.append((f"{emoji} {cat}", btn_data))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return inline_kb(rows)
+
 async def cmd_stats_inline(chat_id, context):
     recs = get_current_month_records()
     if not recs:
@@ -1280,6 +1284,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚙️ *Прочее*:", parse_mode="Markdown", reply_markup=OTHER_KB); return
     if text == "🎯 Цели": await cmd_goals(update, context); return
 
+    # ── ПРОСТО ЧИСЛО: спрашиваем категорию ──────────────────────────────────
+    # Срабатывает когда пользователь пишет только сумму без описания
+    # Примеры: "1650", "500", "3к", "1.5к", "200 грн"
+    just_number_match = JUST_NUMBER_PATTERN.match(text.strip())
+    if just_number_match:
+        amount_raw = just_number_match.group(1).strip().replace(" ", "").replace(",", ".")
+        mult = 1000 if re.search(r"[кК](?:р|ривень|уб)?$|тис", amount_raw, re.IGNORECASE) else 1
+        amount_clean_str = re.sub(r"[кКтТис]+.*$", "", amount_raw, flags=re.IGNORECASE)
+        try:
+            amount_val = float(amount_clean_str) * mult
+            if amount_val > 0:
+                set_ctx(chat_id, pending_amount=amount_val)
+                kb = build_category_kb(amount_val)
+                await update.message.reply_text(
+                    f"💰 *{fmt(amount_val)} ₴* — что это?\n\nВыбери категорию:",
+                    parse_mode="Markdown",
+                    reply_markup=kb
+                )
+                return
+        except (ValueError, TypeError):
+            pass  # не смогли распарсить — идём дальше обычным путём
+
     # Быстрый undo
     if re.search(r"(удал|убер|скасу|відмін|cancel|undo).*(останн|последн|last|запис|трат|витрат)", text, re.IGNORECASE) or \
        re.match(r"(удал|убер|скасу|відмін)[иьує]?\s*$", text.strip(), re.IGNORECASE):
@@ -1418,17 +1444,6 @@ def _regex_route(text: str) -> list | None:
 
 
 # ── LLM-РОУТЕР ───────────────────────────────────────────────────────────────
-# СЕМАНТИКА ДОЛГОВ (закреплена в системном промпте и few-shot):
-#
-#  debt_new:    "дал/дав/позичив Имя сумму"   → Имя должен МНЕ
-#               "Имя борг/долг сумма"           → Имя должен МНЕ
-#
-#  debt_return: "Имя вернул/повернув/отдал МНЕ сумму" → Имя вернул долг
-#               "Имя погасил"
-#
-#  ВАЖНО: "отдал Саше" (без контекста возврата) — НЕ debt_return,
-#          это я что-то отдал/заплатил — скорее expense или question
-
 ROUTER_SYSTEM = """Финансовый бот. Верни ТОЛЬКО JSON {{"actions":[...]}}.
 
 ДЕЙСТВИЯ:
@@ -1477,52 +1492,36 @@ async def route_message(text: str, chat_id, conv_ctx: dict) -> list:
 
     system = ROUTER_SYSTEM.format(context=ctx_info, debts=debts_info, goals=goals_info, user_cats=user_cats_info)
 
-    # Few-shot с чёткой семантикой долгов
     messages = [
         {"role":"system","content":system},
-        # Трата
         {"role":"user","content":"снюс 800"},
         {"role":"assistant","content":'{"actions":[{"action":"expense","expenses":[{"amount":800,"category":"Никотин","description":"снюс","emoji":"🚬"}]}]}'},
-        # Долг: я дал — Саша должен МНЕ
         {"role":"user","content":"дал Саше 500"},
         {"role":"assistant","content":'{"actions":[{"action":"debt_new","name":"Саша","amounts":[{"amount":500,"currency":"UAH"}],"note":""}]}'},
-        # Долг: папа должен МНЕ
         {"role":"user","content":"дал папе 2000"},
         {"role":"assistant","content":'{"actions":[{"action":"debt_new","name":"Папа","amounts":[{"amount":2000,"currency":"UAH"}],"note":""}]}'},
-        # Долг в долларах: папа должен МНЕ $
         {"role":"user","content":"дал папе 55000 долларов"},
         {"role":"assistant","content":'{"actions":[{"action":"debt_new","name":"Папа","amounts":[{"amount":55000,"currency":"USD"}],"note":""}]}'},
-        # Долг: Имя борг
         {"role":"user","content":"папа борг 2000 доларів"},
         {"role":"assistant","content":'{"actions":[{"action":"debt_new","name":"Папа","amounts":[{"amount":2000,"currency":"USD"}],"note":""}]}'},
-        # Долг: добавить к существующему
         {"role":"user","content":"папа долг + 55 000 доларів"},
         {"role":"assistant","content":'{"actions":[{"action":"debt_add","name":"Папа","amount":55000,"currency":"USD"}]}'},
-        # Возврат: Саша ВЕРНУЛ МНЕ
         {"role":"user","content":"Саша вернул 300"},
         {"role":"assistant","content":'{"actions":[{"action":"debt_return","name":"Саша","amount":300,"currency":"UAH"}]}'},
-        # Возврат: папа отдал МНЕ
         {"role":"user","content":"папа отдал 55000"},
         {"role":"assistant","content":'{"actions":[{"action":"debt_return","name":"Папа","amount":55000,"currency":"UAH"}]}'},
-        # Возврат в долларах
         {"role":"user","content":"папа вернул 1000 долларов"},
         {"role":"assistant","content":'{"actions":[{"action":"debt_return","name":"Папа","amount":1000,"currency":"USD"}]}'},
-        # НЕ трата: пополнение
         {"role":"user","content":"пополнение счета 500"},
         {"role":"assistant","content":'{"actions":[{"action":"question","text":"Пополнение счёта — не трата, ничего не записал."}]}'},
-        # Бюджет + долг
         {"role":"user","content":"дал Саше 500 и бюджет 25к"},
         {"role":"assistant","content":'{"actions":[{"action":"debt_new","name":"Саша","amounts":[{"amount":500,"currency":"UAH"}],"note":""},{"action":"budget_set","amount":25000}]}'},
-        # Зарплата
         {"role":"user","content":"зарплата 6-го 25 000"},
         {"role":"assistant","content":'{"actions":[{"action":"salary_set","day":6,"amount":25000}]}'},
-        # Конвертация
         {"role":"user","content":"100 баксів в гривні"},
         {"role":"assistant","content":'{"actions":[{"action":"convert","amount":100,"from_currency":"USD","to_currency":"UAH"}]}'},
-        # Вопрос
         {"role":"user","content":"сколько потратил на еду?"},
         {"role":"assistant","content":'{"actions":[{"action":"question","text":"сколько потратил на еду?"}]}'},
-        # Текущий запрос
         {"role":"user","content":text},
     ]
     try:
@@ -1597,7 +1596,6 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
             cur = route.get("currency","UAH")
             if amt: ams = [{"amount":float(amt),"currency":cur}]
         if not name or not ams: return "🤔 Не понял кому и сколько."
-        # Автокоррекция валюты из текста
         detected_cur = _detect_currency(text)
         if detected_cur != "UAH":
             for a in ams:
@@ -1672,7 +1670,6 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
                         lines.append(f"💸 {sym}: вернул {fmt(ret_amount)} → остаток *{fmt(new)} {sym}*")
                     break
             else:
-                # Валюта не найдена в долгах — пробуем любую
                 if ex_ams:
                     ea = ex_ams[0]
                     new = float(ea["amount"]) - float(ret_amount)
@@ -1753,10 +1750,7 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         from_cur = route.get("from_currency", "USD").upper()
         to_cur = route.get("to_currency", "UAH").upper()
 
-        # Автодетект направления из текста если LLM не разобрался
-        # Примеры: "55 000 в долларах" → UAH→USD, "100 баксів в гривні" → USD→UAH
         t = text.lower()
-        # Явное "в долларах/евро" без исходной валюты → конвертируем из UAH
         if re.search(r"\bв\s+(долар\w*|доллар\w*|бакс\w*|usd|\$)", t) and \
            not re.search(r"долар\w*|доллар\w*|бакс\w*|usd|\$", t.split("в")[0]):
             from_cur = "UAH"
@@ -1765,10 +1759,8 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
              not re.search(r"євро\w*|евро\w*|eur\b|€", t.split("в")[0]):
             from_cur = "UAH"
             to_cur = "EUR"
-        # Явное "в гривнях/грн" → конвертируем в UAH
         elif re.search(r"\bв\s+(гривн\w*|грн\b|₴|uah\b)", t):
             to_cur = "UAH"
-            # from_cur берём из роутера или определяем из текста
             if from_cur == "UAH":
                 if re.search(r"долар\w*|доллар\w*|бакс\w*|usd|\$", t):
                     from_cur = "USD"
@@ -1778,20 +1770,17 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         rates = await fetch_nbu_rates()
 
         if to_cur == "UAH":
-            # from_cur → UAH
             rate = rates.get(from_cur, 1.0)
             result = amount * rate
             from_sym = CURRENCY_SYMBOLS.get(from_cur, from_cur)
             return f"💱 *{fmt(amount)} {from_sym}* = *{fmt(result)} ₴*\n_(курс НБУ: {rate:.2f} ₴/{from_sym})_"
         elif from_cur == "UAH":
-            # UAH → to_cur
             rate = rates.get(to_cur, 1.0)
             if rate == 0: return "❌ Не удалось получить курс."
             result = amount / rate
             to_sym = CURRENCY_SYMBOLS.get(to_cur, to_cur)
             return f"💱 *{fmt(amount)} ₴* = *{result:.2f} {to_sym}*\n_(курс НБУ: {rate:.2f} ₴/{to_sym})_"
         else:
-            # from_cur → UAH → to_cur (кросс-курс)
             rate_from = rates.get(from_cur, 1.0)
             rate_to = rates.get(to_cur, 1.0)
             uah = amount * rate_from
@@ -1938,6 +1927,54 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async def send(text, **kw):
         await context.bot.send_message(chat_id=chat_id, text=text, **kw)
 
+    # ── НОВЫЙ HANDLER: выбор категории для голой суммы ───────────────────────
+    # callback_data формат: qcat_{category_index}_{amount}
+    if data.startswith("qcat_"):
+        parts = data.split("_", 2)  # ["qcat", index, amount]
+        if len(parts) == 3:
+            try:
+                cat_idx = int(parts[1])
+                amount = float(parts[2])
+                cats = get_all_categories()
+                if cat_idx >= len(cats):
+                    await query.edit_message_text("❌ Категория не найдена."); return
+                cat = cats[cat_idx]
+                emoji = get_category_emoji(cat)
+                date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
+                # Описание = название категории в нижнем регистре
+                desc = cat.lower()
+                save_expense(date, amount, cat, desc, str(amount))
+
+                # Считаем итог по категории за месяц
+                month_recs = get_current_month_records()
+                sk = get_sum_key(month_recs)
+                cat_total = sum(
+                    float(r[sk]) for r in month_recs
+                    if fix_cat(r.get("Категория", "")) == cat and r.get(sk)
+                )
+
+                msg = (
+                    f"✅ *Записано!*\n\n"
+                    f"{emoji} *{cat}* — *{fmt(amount)} ₴*"
+                )
+                if cat_total > 0:
+                    msg += f"\n\n_{emoji} {cat} за месяц: *{fmt(cat_total)} ₴*_"
+
+                # Проверка бюджета
+                bs = get_budget_status(chat_id)
+                if bs:
+                    pct = bs["percent"]
+                    if pct >= 90:
+                        msg += f"\n🔴 *Бюджет на {pct}%!*"
+                    elif pct >= 70:
+                        msg += f"\n🟡 Бюджет на {pct}%"
+
+                await query.edit_message_text(msg, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"qcat callback error: {e}")
+                await query.edit_message_text("❌ Ошибка при сохранении. Попробуй ещё раз.")
+        return
+
     if data.startswith("menu_"):
         action = data[5:]
         if action == "stats": await cmd_stats_inline(chat_id, context)
@@ -2021,13 +2058,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         label = DAYS_LABELS.get(days, f"{days} дней")
         await query.edit_message_text(f"✅ Интервал установлен: *{label}*", parse_mode="Markdown"); return
 
+    # Старый quick_ handler оставлен для совместимости
     if data.startswith("quick_"):
-        _, cat, amt_str = data.split("_", 2)
-        amount = float(amt_str)
-        date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
-        save_expense(date, amount, cat, "быстрая запись", str(amount))
-        await query.edit_message_text(
-            f"⚡ *{fmt(amount)} ₴* → {get_category_emoji(cat)} {cat}\n✅ Записано!", parse_mode="Markdown"); return
+        parts = data.split("_", 2)
+        if len(parts) == 3:
+            _, cat, amt_str = parts
+            amount = float(amt_str)
+            date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
+            emoji = get_category_emoji(cat)
+            desc = cat.lower()
+            save_expense(date, amount, cat, desc, str(amount))
+            await query.edit_message_text(
+                f"✅ *{fmt(amount)} ₴* записано!\n{emoji} _{cat}_",
+                parse_mode="Markdown")
+        return
 
     if data == "show_debts":
         if not debts: await query.edit_message_text("✅ Никто тебе не должен!"); return
