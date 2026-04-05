@@ -1446,8 +1446,6 @@ async def cmd_stats_inline(chat_id, context):
                   f"Осталось: *{fmt(bs['left'])} ₴*"]
     lines += _leak_lines(s)
     await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown")
-    lines += _leak_lines(s)
-    await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown")
 
 async def cmd_budget_inline(chat_id, context):
     bs = get_budget_status(chat_id)
