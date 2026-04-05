@@ -2350,28 +2350,10 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         name = str(route.get("name","Платёж")).strip().capitalize()
         amount = float(str(route.get("amount",0)).replace(",","."))
         day = int(route.get("day", 1))
-        category = str(route.get("category","")).strip()
-        emoji_r = str(route.get("emoji","")).strip()
-
-if not category or category.lower() == "другое":
-    category, auto_emoji = infer_category_from_name(name)
-    if not emoji_r:
-        emoji_r = auto_emoji
-
-category = fix_cat(category, keep_new=True)
-emoji_r = emoji_r or get_category_emoji(category)
-
-if category not in get_all_categories():
-    save_user_category(category, emoji_r)
-    if not category or category.lower() == "другое":
-       category, auto_emoji = infer_category_from_name(name)
-       if not emoji_r:
-        emoji_r = auto_emoji
-
-    category = fix_cat(category, keep_new=True)
-    emoji_r = emoji_r or get_category_emoji(category)
-   if amount <= 0: return "🤔 Не понял сумму. Пример: «Учёба каждый месяц 24го 3000»"
-    if not 1 <= day <= 31: return "🤔 Не понял день месяца."
+        category = str(route.get("category","Другое")).strip() or "Другое"
+        emoji_r = str(route.get("emoji","🔄")).strip() or "🔄"
+        if amount <= 0: return "🤔 Не понял сумму. Пример: «Учёба каждый месяц 24го 3000»"
+        if not 1 <= day <= 31: return "🤔 Не понял день месяца."
     _recurring_counter[0] += 1
     rid = str(_recurring_counter[0])
     recurring[rid] = {"name":name,"amount":amount,"day":day,"category":category,"emoji":emoji_r}
