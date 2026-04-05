@@ -2375,11 +2375,11 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
                 f"_{category}_\n\n"
                 f"_Буду автоматически записывать трату каждый месяц {day}-го числа_")
        
-elif action == "question":
+    elif action == "question":
         q = route.get("text", text)
         return await ai_chat_response(chat_id, q)
 
-return None
+    return None
 
 
 async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
