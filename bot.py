@@ -86,7 +86,35 @@ JUST_NUMBER_PATTERN = re.compile(
     r"^\s*(\d[\d\s]*(?:[.,]\d+)?(?:\s*к(?:р|ривень|уб)?|\s*тис(?:яч)?)?)\s*(?:₴|грн|грн\.?|uah)?\s*$",
     re.IGNORECASE
 )
-
+def _parse_amount_str(s: str) -> float | None:
+    """Универсальный парсер суммы: '2262,33' → 2262.33, '3к' → 3000, '1 500' → 1500."""
+    s = s.strip()
+    # Убираем валютные символы
+    s = re.sub(r"\s*(?:₴|грн\.?|uah)\s*$", "", s, flags=re.IGNORECASE).strip()
+    # Тысячный разделитель пробел: "1 500" → "1500"
+    # Если запятая разделитель тысяч (1,500) или дробная (2262,33) — нужно различить
+    # Правило: если после запятой ровно 3 цифры и нет точки → тысячный разделитель
+    # Если после запятой 1-2 цифры → дробная часть
+    s_nospace = s.replace(" ", "")
+    mult = 1
+    if re.search(r"к(?:р|ривень|уб)?$|тис", s_nospace, re.IGNORECASE):
+        mult = 1000
+        s_nospace = re.sub(r"[кКтТис]+.*$", "", s_nospace, flags=re.IGNORECASE)
+    # Нормализуем разделители
+    if "," in s_nospace and "." not in s_nospace:
+        # Проверяем: если после запятой ровно 3 цифры — тысячный разделитель
+        m = re.match(r"^(\d+),(\d+)$", s_nospace)
+        if m and len(m.group(2)) == 3:
+            s_nospace = s_nospace.replace(",", "")  # убираем разделитель тысяч
+        else:
+            s_nospace = s_nospace.replace(",", ".")  # дробная часть
+    elif "." in s_nospace and "," in s_nospace:
+        # "1.500,50" европейский формат
+        s_nospace = s_nospace.replace(".", "").replace(",", ".")
+    try:
+        return float(s_nospace) * mult
+    except:
+        return None
 # ── ВАЛЮТНЫЕ ПАТТЕРНЫ ─────────────────────────────────────────────────────────
 CURRENCY_AMOUNT_PATTERNS = re.compile(
     r"(\d[\d\s,\.]*)\s*"
@@ -355,16 +383,63 @@ def month_name(n: int, gen: bool = False) -> str:
 
 # ── БЮДЖЕТ / ЗАРПЛАТА ────────────────────────────────────────────────────────
 memory: dict = {}
+def get_salary_day(chat_id) -> int:
+    """Возвращает день зарплаты (1-31), по умолчанию 1."""
+    info = get_salary_info(chat_id)
+    if info and info.get("day"): return int(info["day"])
+    return 1
+
+def get_period_start(chat_id) -> datetime:
+    """Начало текущего зарплатного периода (день зарплаты текущего или прошлого месяца)."""
+    now = datetime.now(KYIV_TZ)
+    sal_day = get_salary_day(chat_id)
+    if now.day >= sal_day:
+        # Зарплата уже была в этом месяце
+        try:
+            return now.replace(day=sal_day, hour=0, minute=0, second=0, microsecond=0)
+        except ValueError:
+            return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        # Зарплата ещё не была — берём прошлый месяц
+        first_of_month = now.replace(day=1)
+        prev_month_last = first_of_month - timedelta(days=1)
+        sal_day_clamped = min(sal_day, prev_month_last.day)
+        return prev_month_last.replace(day=sal_day_clamped, hour=0, minute=0, second=0, microsecond=0)
+
+def get_period_records(chat_id) -> list:
+    """Записи за текущий зарплатный период (от дня зарплаты до сегодня)."""
+    start = get_period_start(chat_id)
+    result = []
+    for r in get_all_records():
+        try:
+            d = datetime.strptime(r.get("Дата","")[:10], "%d.%m.%Y").replace(tzinfo=KYIV_TZ)
+            if d >= start: result.append(r)
+        except: pass
+    return result
+
+def get_yesterday_records() -> list:
+    """Записи за вчерашний день."""
+    yesterday = (datetime.now(KYIV_TZ) - timedelta(days=1)).strftime("%d.%m.%Y")
+    return [r for r in get_all_records() if r.get("Дата","").startswith(yesterday)]
 
 def get_budget_status(chat_id):
     val = get_setting(f"budget_{chat_id}")
     if not val: return None
     try: budget = float(val)
     except: return None
-    recs = get_current_month_records()
+# Считаем от дня зарплаты
+    recs = get_period_records(chat_id)
     spent = sum_records(recs)
     left = budget - spent
-    return {"budget":budget,"spent":spent,"left":left,"percent":min(int(spent/budget*100),100)}
+   period_start = get_period_start(chat_id)
+    now = datetime.now(KYIV_TZ)
+    days_in_period = (now - period_start).days + 1
+    return {
+        "budget": budget, "spent": spent, "left": left,
+        "percent": min(int(spent / budget * 100), 100),
+        "period_start": period_start,
+        "days_in_period": days_in_period,
+    }
 
 def get_salary_info(chat_id):
     val = get_setting(f"salary_{chat_id}")
@@ -388,18 +463,21 @@ def build_salary_status(chat_id) -> str | None:
         nm = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
         next_sal = nm.replace(day=min(day, 28))
         days_left = (next_sal - now).days
-    spent = sum_records(get_current_month_records())
+   # Траты считаем от дня зарплаты
+    spent = sum_records(get_period_records(chat_id))
+    period_start = get_period_start(chat_id)
     lines = [f"💵 *День зарплаты — {day}-е число*\n"]
+     lines.append(f"📅 Период: с *{period_start.strftime('%d.%m')}*")
     if days_left == 0: lines.append("🎉 *Сегодня зарплата!*")
     elif days_left == 1: lines.append("⏰ *Завтра зарплата!*")
     else: lines.append(f"📅 До зарплаты: *{days_left} дней* ({next_sal.strftime('%d')} {month_name(next_sal.month, True)})")
-    lines.append(f"\n💸 Потрачено: *{fmt(spent)} ₴*")
+     lines.append(f"\n💸 Потрачено за период: *{fmt(spent)} ₴*")
     if amount:
         left = amount - spent
         lines.append(f"💰 Зарплата: *{fmt(amount)} ₴*")
         lines.append(f"{'🟢' if left>0 else '🔴'} Осталось: *{fmt(left)} ₴*")
         if days_left > 0 and left > 0:
-            lines.append(f"📊 Можно тратить: *{fmt(left/days_left)} ₴/день*")
+             lines.append(f"📊 Можно тратить: *{fmt(left/max(days_left,1))} ₴/день*")
     return "\n".join(lines)
 
 # ── НАПОМИНАНИЯ ──────────────────────────────────────────────────────────────
@@ -931,19 +1009,29 @@ def parse_expenses(text: str) -> list:
 
 # ── ФИНАНСОВЫЙ КОНТЕКСТ ───────────────────────────────────────────────────────
 def get_financial_context(chat_id) -> str:
-    recs = get_current_month_records()
+   now = datetime.now(KYIV_TZ)
+    # Используем записи за зарплатный период (если есть зарплата) иначе за месяц
+    period_recs = get_period_records(chat_id)
+    month_recs = get_current_month_records()
+    recs = period_recs if period_recs else month_recs
     s = analyze_records(recs)
     bs = get_budget_status(chat_id)
     sal = get_salary_info(chat_id)
-    parts = [f"Сегодня: {datetime.now(KYIV_TZ).strftime('%d.%m.%Y')}"]
+  # Вчерашние траты
+    yesterday_recs = get_yesterday_records()
+    yesterday_spent = sum_records(yesterday_recs)
+    period_start = get_period_start(chat_id)
+    parts = [f"Сегодня: {now.strftime('%d.%m.%Y')}"]
+    parts.append(f"Вчера ({(now-timedelta(days=1)).strftime('%d.%m')}): {fmt(yesterday_spent)} ₴")
     if s:
-        parts.append(f"Траты за {month_name(datetime.now(KYIV_TZ).month)}: {fmt(s['total'])} ₴")
-        cats = "; ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1])[:4])
-        parts.append(f"Категории: {cats}")
+        parts.append(f"Траты за период (с {period_start.strftime('%d.%m')}): {fmt(s['total'])} ₴")
+        cats = "; ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1])[:5])
+        parts.append(f"По категориям: {cats}")
     if bs:
         parts.append(f"Бюджет: {fmt(bs['budget'])}₴, использовано {bs['percent']}%, осталось {fmt(bs['left'])}₴")
     if sal:
-        parts.append(f"Зарплата: {sal.get('amount','?')}₴, {sal['day']}-е число")
+        sal_day = sal['day']
+        parts.append(f"День зарплаты: {sal_day}-е число, сумма: {sal.get('amount','?')}₴")
     if debts:
         dl = "; ".join(f"{d['name']}: {format_amounts(d['amounts']).replace('*','')}" for d in list(debts.values())[:3])
         parts.append(f"Мне должны: {dl}")
@@ -1215,24 +1303,76 @@ async def send_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
     bs = get_budget_status(cid)
     sal = get_salary_info(cid)
     now = datetime.now(KYIV_TZ)
-    lines = [f"☀️ *Доброе утро, {now.strftime('%d.%m')}!*\n"]
-    today_spent = sum_records(get_today_records())
-    if today_spent > 0:
-        lines.append(f"📌 Вчера потрачено: *{fmt(today_spent)} ₴*")
+    day_names_short = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
+    day_name = day_names_short[now.weekday()]
+    lines = [f"☀️ *Доброе утро! {now.strftime('%d.%m')} ({day_name})*\n"]
+
+    # Вчерашние траты (корректно — берём записи за вчера)
+    yesterday_recs = get_yesterday_records()
+    yesterday_spent = sum_records(yesterday_recs)
+    if yesterday_spent > 0:
+        lines.append(f"📌 Вчера потрачено: *{fmt(yesterday_spent)} ₴*")
+        # Топ категория вчера
+        if yesterday_recs:
+            by_cat: dict = {}
+            sk = get_sum_key(yesterday_recs)
+            for r in yesterday_recs:
+                cat = r.get("Категория","?")
+                by_cat[cat] = by_cat.get(cat, 0) + float(r.get(sk, 0) or 0)
+            if by_cat:
+                top_cat = max(by_cat, key=by_cat.get)
+                lines.append(f"   └ Топ: {get_category_emoji(top_cat)} {top_cat} — {fmt(by_cat[top_cat])} ₴")
+    else:
+        lines.append("📌 Вчера трат не было 👌")
+
+    lines.append("")
+
+    # Бюджет (с прогресс-баром)
     if bs:
-        days_left = 30 - now.day + 1
-        daily_limit = bs["left"] / max(days_left, 1)
-        lines.append(f"💰 Бюджет: *{bs['percent']}%* использован")
-        lines.append(f"📊 Лимит сегодня: *{fmt(daily_limit)} ₴*")
+       pct = bs["percent"]
+        filled = pct // 10
+        bar = "█" * filled + "░" * (10 - filled)
+        status_icon = "🟢" if pct < 70 else "🟡" if pct < 90 else "🔴"
+        lines.append(f"{status_icon} Бюджет: [{bar}] *{pct}%*")
+        lines.append(f"   Потрачено: {fmt(bs['spent'])} / {fmt(bs['budget'])} ₴")
+        # Лимит на сегодня = остаток / дни до зарплаты
+        sal_day = get_salary_day(cid)
+        if now.day < sal_day:
+            days_to_sal = sal_day - now.day
+        else:
+            nm = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
+            days_to_sal = (nm.replace(day=min(sal_day, 28)) - now).days
+        if days_to_sal > 0 and bs["left"] > 0:
+            daily_limit = bs["left"] / days_to_sal
+            lines.append(f"   💡 Лимит сегодня: *{fmt(daily_limit)} ₴* (до зарплаты {days_to_sal} дн.)")
+        elif bs["left"] <= 0:
+            lines.append(f"   ❗ Бюджет превышен на *{fmt(abs(bs['left']))} ₴*")
     elif sal and sal.get("amount"):
-        spent = sum_records(get_current_month_records())
+          # Нет бюджета, но есть зарплата
+        spent = sum_records(get_period_records(cid))
         left = float(sal["amount"]) - spent
         sal_day = sal["day"]
-        days_left = (sal_day - now.day) if now.day < sal_day else (
-            (datetime.now(KYIV_TZ).replace(day=1) + timedelta(days=32)).replace(day=sal_day) - now).days
-        if days_left > 0:
-            lines.append(f"💵 До зарплаты *{fmt(left/max(days_left,1))} ₴/день*")
-    if len(lines) > 1:
+        if now.day < sal_day:
+            days_to_sal = sal_day - now.day
+        else:
+            nm = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
+            days_to_sal = (nm.replace(day=min(sal_day, 28)) - now).days
+        pct = min(int(spent / float(sal["amount"]) * 100), 100)
+        filled = pct // 10
+        bar = "█" * filled + "░" * (10 - filled)
+        status_icon = "🟢" if pct < 70 else "🟡" if pct < 90 else "🔴"
+        lines.append(f"{status_icon} Зарплата: [{bar}] *{pct}%*")
+        lines.append(f"   Потрачено: {fmt(spent)} / {fmt(float(sal['amount']))} ₴")
+        if days_to_sal > 0 and left > 0:
+            lines.append(f"   💡 Можно тратить: *{fmt(left/days_to_sal)} ₴/день*")
+
+    # Траты за текущий период
+    period_recs = get_period_records(cid) if (bs or sal) else get_current_month_records()
+    period_spent = sum_records(period_recs)
+    if period_spent > 0 and not (bs or sal):
+        lines.append(f"\n📊 За месяц: *{fmt(period_spent)} ₴*")
+
+    if len(lines) > 2:
         await context.bot.send_message(chat_id=cid, text="\n".join(lines), parse_mode="Markdown")
 
 # ── КЛАВИАТУРА ───────────────────────────────────────────────────────────────
@@ -1286,19 +1426,26 @@ def build_category_kb(amount: float) -> InlineKeyboardMarkup:
     return inline_kb(rows)
 
 async def cmd_stats_inline(chat_id, context):
-    recs = get_current_month_records()
+    now = datetime.now(KYIV_TZ)
+    period_start = get_period_start(chat_id)
+    recs = get_period_records(chat_id)
     if not recs:
         await context.bot.send_message(chat_id=chat_id, text="📭 В этом месяце ещё нет записей."); return
     s = analyze_records(recs)
-    now = datetime.now(KYIV_TZ)
-    avg = s["total"]/now.day if now.day else 0
-    lines = [f"📊 *Статистика за {month_name(now.month)}* ({s['count']} записей)\n"]
+   days_in_period = max((now - period_start).days + 1, 1)
+    avg = s["total"] / days_in_period
+    period_label = f"с {period_start.strftime('%d.%m')}"
+    lines = [f"📊 *Статистика {period_label}* ({s['count']} записей)\n"]
     lines += _cat_lines(s)
-    lines += [f"\n💰 *Итого: {fmt(s['total'])} ₴*", f"📈 Прогноз: *~{fmt(avg*30)} ₴*"]
+     lines += [f"\n💰 *Итого: {fmt(s['total'])} ₴*", f"📈 Среднее: *{fmt(avg)} ₴/день*"]
     bs = get_budget_status(chat_id)
     if bs:
         bar = "█"*(bs["percent"]//10) + "░"*(10-bs["percent"]//10)
-        lines += [f"\n💰 Бюджет: [{bar}] {bs['percent']}%", f"Осталось: *{fmt(bs['left'])} ₴*"]
+       lines += [f"\n{'🟢' if bs['percent']<70 else '🟡' if bs['percent']<90 else '🔴'} Бюджет: [{bar}] {bs['percent']}%",
+                  f"Потрачено: *{fmt(bs['spent'])} ₴* / {fmt(bs['budget'])} ₴",
+                  f"Осталось: *{fmt(bs['left'])} ₴*"]
+    lines += _leak_lines(s)
+    await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown")
     lines += _leak_lines(s)
     await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown")
 
