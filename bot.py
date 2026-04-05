@@ -431,7 +431,7 @@ def get_budget_status(chat_id):
     recs = get_period_records(chat_id)
     spent = sum_records(recs)
     left = budget - spent
-   period_start = get_period_start(chat_id)
+    period_start = get_period_start(chat_id)
     now = datetime.now(KYIV_TZ)
     days_in_period = (now - period_start).days + 1
     return {
