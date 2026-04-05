@@ -471,7 +471,7 @@ def build_salary_status(chat_id) -> str | None:
     if days_left == 0: lines.append("🎉 *Сегодня зарплата!*")
     elif days_left == 1: lines.append("⏰ *Завтра зарплата!*")
     else: lines.append(f"📅 До зарплаты: *{days_left} дней* ({next_sal.strftime('%d')} {month_name(next_sal.month, True)})")
-     lines.append(f"\n💸 Потрачено за период: *{fmt(spent)} ₴*")
+    lines.append(f"\n💸 Потрачено за период: *{fmt(spent)} ₴*")
     if amount:
         left = amount - spent
         lines.append(f"💰 Зарплата: *{fmt(amount)} ₴*")
