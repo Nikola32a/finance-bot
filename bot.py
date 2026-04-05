@@ -1437,7 +1437,7 @@ async def cmd_stats_inline(chat_id, context):
     period_label = f"с {period_start.strftime('%d.%m')}"
     lines = [f"📊 *Статистика {period_label}* ({s['count']} записей)\n"]
     lines += _cat_lines(s)
-     lines += [f"\n💰 *Итого: {fmt(s['total'])} ₴*", f"📈 Среднее: *{fmt(avg)} ₴/день*"]
+    lines += [f"\n💰 *Итого: {fmt(s['total'])} ₴*", f"📈 Среднее: *{fmt(avg)} ₴/день*"]
     bs = get_budget_status(chat_id)
     if bs:
         bar = "█"*(bs["percent"]//10) + "░"*(10-bs["percent"]//10)
