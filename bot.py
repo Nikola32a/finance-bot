@@ -2397,7 +2397,7 @@ elif action == "question":
         q = route.get("text", text)
         return await ai_chat_response(chat_id, q)
 
-    return None
+return None
 
 
 async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
