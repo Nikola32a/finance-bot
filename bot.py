@@ -1432,7 +1432,7 @@ async def cmd_stats_inline(chat_id, context):
     if not recs:
         await context.bot.send_message(chat_id=chat_id, text="📭 В этом месяце ещё нет записей."); return
     s = analyze_records(recs)
-   days_in_period = max((now - period_start).days + 1, 1)
+    days_in_period = max((now - period_start).days + 1, 1)
     avg = s["total"] / days_in_period
     period_label = f"с {period_start.strftime('%d.%m')}"
     lines = [f"📊 *Статистика {period_label}* ({s['count']} записей)\n"]
