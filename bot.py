@@ -2368,8 +2368,8 @@ if category not in get_all_categories():
        if not emoji_r:
         emoji_r = auto_emoji
 
-     category = fix_cat(category, keep_new=True)
-     emoji_r = emoji_r or get_category_emoji(category)
+    category = fix_cat(category, keep_new=True)
+    emoji_r = emoji_r or get_category_emoji(category)
         if amount <= 0: return "🤔 Не понял сумму. Пример: «Учёба каждый месяц 24го 3000»"
         if not 1 <= day <= 31: return "🤔 Не понял день месяца."
         _recurring_counter[0] += 1
