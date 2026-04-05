@@ -1738,8 +1738,8 @@ def _regex_route(text: str) -> list | None:
             amt_s = re.sub(r"[кК]$","",amt_s)
             amount = float(amt_s) * mult
             if 1 <= day <= 31 and amount > 0:
-                cat, em = infer_category_from_name(name) 
-         return [{"action":"recurring_new","name":name,"amount":amount,"day":day,"category":cat,"emoji":em}]
+              cat, em = infer_category_from_name(name) 
+            return [{"action":"recurring_new","name":name,"amount":amount,"day":day,"category":cat,"emoji":em}]
         except: pass
 
     # Не-траты → LLM
