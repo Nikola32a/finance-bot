@@ -794,8 +794,7 @@ def build_debts_msg() -> str:
     return "\n".join(lines)
 
 # ── РАССРОЧКА ─────────────────────────────────────────────────────────────────
-installments: dict = {}
-installment_counter = [0]
+recurring: dict = {}
 memory: dict = {}
 def _installments_sheet():
     sh = _get_worksheet("Рассрочка")
@@ -999,7 +998,7 @@ def parse_expenses(text: str) -> list:
                 amt = float(str(item.get("amount","0")).replace(",","."))
                 if amt <= 0: continue
                 item["amount"] = amt
-                item["category"] = fix_cat(item.get("category","Другое"))
+                item["category"] = fix_cat(item.get("category",""), keep_new=True)
                 validated.append(item)
             except: continue
         return validated
@@ -1739,7 +1738,8 @@ def _regex_route(text: str) -> list | None:
             amt_s = re.sub(r"[кК]$","",amt_s)
             amount = float(amt_s) * mult
             if 1 <= day <= 31 and amount > 0:
-                return [{"action":"recurring_new","name":name,"amount":amount,"day":day,"category":"Другое","emoji":"🔄"}]
+                cat, em = infer_category_from_name(name) 
+              return [{"action":"recurring_new","name":name,"amount":amount,"day":day,"category":cat,"emoji":em}]
         except: pass
 
     # Не-траты → LLM
@@ -2291,12 +2291,22 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         date_str = datetime.now(KYIV_TZ).strftime("%d.%m.%Y")
         installments[iid] = {"name":name,"total":total,"monthly":monthly,"paid":0.0,"payments_left":months,"date":date_str}
         save_installment_to_sheet(iid, name, total, monthly, 0, months, date_str)
+        save_setting(
+          f"last_installment_{chat_id}",
+          json.dumps({
+           "id": iid,
+           "name": name,
+           "total": total,
+           "monthly": monthly,
+           "months": months
+          }, ensure_ascii=False)
+)
         bar = "░" * 10
         return (f"💳 *Рассрочка: {name}*\n\n[{bar}] 0%\n"
                 f"Выплачено: 0 / {fmt(total)} ₴\n"
                 f"Ежемесячно: *{fmt(monthly)} ₴* × {months} платежей\n\n"
                 f"_Напиши «оплатил рассрочку {name}» когда внесёшь платёж_")
-
+       
     elif action == "installment_pay":
         name_hint = str(route.get("name","")).lower().strip()
         amount = float(str(route.get("amount",0)).replace(",","."))
@@ -2340,20 +2350,49 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         name = str(route.get("name","Платёж")).strip().capitalize()
         amount = float(str(route.get("amount",0)).replace(",","."))
         day = int(route.get("day", 1))
-        category = str(route.get("category","Другое")).strip() or "Другое"
-        emoji_r = str(route.get("emoji","🔄")).strip() or "🔄"
+        category = str(route.get("category","")).strip()
+        emoji_r = str(route.get("emoji","")).strip()
+
+if not category or category.lower() == "другое":
+    category, auto_emoji = infer_category_from_name(name)
+    if not emoji_r:
+        emoji_r = auto_emoji
+
+category = fix_cat(category, keep_new=True)
+emoji_r = emoji_r or get_category_emoji(category)
+
+if category not in get_all_categories():
+    save_user_category(category, emoji_r)
+     if not category or category.lower() == "другое":
+       category, auto_emoji = infer_category_from_name(name)
+       if not emoji_r:
+        emoji_r = auto_emoji
+
+     category = fix_cat(category, keep_new=True)
+     emoji_r = emoji_r or get_category_emoji(category)
         if amount <= 0: return "🤔 Не понял сумму. Пример: «Учёба каждый месяц 24го 3000»"
         if not 1 <= day <= 31: return "🤔 Не понял день месяца."
         _recurring_counter[0] += 1
         rid = str(_recurring_counter[0])
         recurring[rid] = {"name":name,"amount":amount,"day":day,"category":category,"emoji":emoji_r}
         save_recurring_to_sheet(rid, name, amount, day, category, emoji_r)
+        save_setting(
+          f"last_recurring_{chat_id}",
+          json.dumps({
+           "id": rid,
+           "name": name,
+           "amount": amount,
+           "day": day,
+           "category": category,
+           "emoji": emoji_r
+          }, ensure_ascii=False)
+)
         return (f"🔄 *Регулярный платёж добавлен!*\n\n"
                 f"{emoji_r} *{name}* — {fmt(amount)} ₴\n"
                 f"📅 Каждое *{day}-е* число\n"
                 f"_{category}_\n\n"
                 f"_Буду автоматически записывать трату каждый месяц {day}-го числа_")
-
+       
     elif action == "question":
         q = route.get("text", text)
         return await ai_chat_response(chat_id, q)
@@ -2789,7 +2828,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             delete_recurring_from_sheet(rid)
             await query.edit_message_text(f"🗑 Платёж *{r['name']}* удалён.", parse_mode="Markdown")
         return
+def infer_category_from_name(name: str) -> tuple[str, str]:
+    desc = name.lower().strip()
 
+    cat_map = [
+        (["еда","продукт","кафе","ресторан","доставка","атб","сільпо","сильпо","новус"], "Еда / продукты", "🍔"),
+        (["такси","бензин","заправк","uber","bolt","метро","автобус","маршрут"], "Транспорт", "🚗"),
+        (["netflix","spotify","youtube","подписк","subscription","iptv","игр","steam"], "Развлечения", "🎮"),
+        (["аптек","лекар","лікар","медиц","стоматолог"], "Здоровье / аптека", "💊"),
+        (["снюс","сигарет","вейп","zyn","velo","никотин"], "Никотин", "🚬"),
+        (["учёб","учеб","курс","школ","универ","репетитор","english"], "Образование", "📚"),
+        (["зал","спорт","фитнес","gym","йога","бокс","бассейн"], "Спорт", "💪"),
+        (["коммун","жкх","свет","газ","вода","интернет","мобильн","телефон"], "Коммунальные", "🏠"),
+        (["одежд","обув","шопинг"], "Одежда", "👕"),
+    ]
+
+    for keywords, cat, em in cat_map:
+        if any(k in desc for k in keywords):
+            return cat, em
+
+    for uc in _user_categories:
+        if uc.lower() in desc or desc in uc.lower():
+            return uc, get_category_emoji(uc)
+
+    # если ничего не нашли — создаём новую категорию из названия
+    new_cat = name.strip().capitalize()
+    if len(new_cat) > 24:
+        new_cat = new_cat.split()[0].capitalize()
+
+    return new_cat, get_category_emoji(new_cat)
     # ── menu_installments / menu_recurring ────────────────────────────────────
     if data == "back":
         await query.edit_message_text("Выбери раздел:", reply_markup=inline_kb([
