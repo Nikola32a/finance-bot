@@ -36,11 +36,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── КОНСТАНТЫ ────────────────────────────────────────────────────────────────
-DEFAULT_CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Никотин"]
+DEFAULT_CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Никотин", "Другое"]
 
 EMOJI_MAP = {
     "Еда / продукты": "🍔", "Транспорт": "🚗", "Развлечения": "🎮",
-    "Здоровье / аптека": "💊", "Никотин": "🚬",
+    "Здоровье / аптека": "💊", "Никотин": "🚬", "Другое": "📦",
     "Одежда": "👕", "Коммунальные": "🏠", "Подписки": "📺",
     "Спорт": "💪", "Образование": "📚", "Путешествия": "✈️",
 }
@@ -794,8 +794,9 @@ def build_debts_msg() -> str:
     return "\n".join(lines)
 
 # ── РАССРОЧКА ─────────────────────────────────────────────────────────────────
-recurring: dict = {}
-memory: dict = {}
+installments: dict = {}
+installment_counter = [0]
+
 def _installments_sheet():
     sh = _get_worksheet("Рассрочка")
     if not sh.get_all_values():
@@ -852,7 +853,7 @@ def build_installments_msg() -> str:
 
 # ── РЕГУЛЯРНЫЕ ПЛАТЕЖИ ────────────────────────────────────────────────────────
 recurring: dict = {}
-memory: dict = {}
+
 def _recurring_sheet():
     sh = _get_worksheet("Регулярные")
     if not sh.get_all_values():
@@ -998,7 +999,7 @@ def parse_expenses(text: str) -> list:
                 amt = float(str(item.get("amount","0")).replace(",","."))
                 if amt <= 0: continue
                 item["amount"] = amt
-                item["category"] = fix_cat(item.get("category",""), keep_new=True)
+                item["category"] = fix_cat(item.get("category","Другое"))
                 validated.append(item)
             except: continue
         return validated
@@ -1445,6 +1446,8 @@ async def cmd_stats_inline(chat_id, context):
                   f"Осталось: *{fmt(bs['left'])} ₴*"]
     lines += _leak_lines(s)
     await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown")
+    lines += _leak_lines(s)
+    await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown")
 
 async def cmd_budget_inline(chat_id, context):
     bs = get_budget_status(chat_id)
@@ -1738,8 +1741,7 @@ def _regex_route(text: str) -> list | None:
             amt_s = re.sub(r"[кК]$","",amt_s)
             amount = float(amt_s) * mult
             if 1 <= day <= 31 and amount > 0:
-              cat, em = infer_category_from_name(name) 
-            return [{"action":"recurring_new","name":name,"amount":amount,"day":day,"category":cat,"emoji":em}]
+                return [{"action":"recurring_new","name":name,"amount":amount,"day":day,"category":"Другое","emoji":"🔄"}]
         except: pass
 
     # Не-траты → LLM
@@ -2291,22 +2293,12 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         date_str = datetime.now(KYIV_TZ).strftime("%d.%m.%Y")
         installments[iid] = {"name":name,"total":total,"monthly":monthly,"paid":0.0,"payments_left":months,"date":date_str}
         save_installment_to_sheet(iid, name, total, monthly, 0, months, date_str)
-        save_setting(
-          f"last_installment_{chat_id}",
-          json.dumps({
-           "id": iid,
-           "name": name,
-           "total": total,
-           "monthly": monthly,
-           "months": months
-          }, ensure_ascii=False)
-)
         bar = "░" * 10
         return (f"💳 *Рассрочка: {name}*\n\n[{bar}] 0%\n"
                 f"Выплачено: 0 / {fmt(total)} ₴\n"
                 f"Ежемесячно: *{fmt(monthly)} ₴* × {months} платежей\n\n"
                 f"_Напиши «оплатил рассрочку {name}» когда внесёшь платёж_")
-       
+
     elif action == "installment_pay":
         name_hint = str(route.get("name","")).lower().strip()
         amount = float(str(route.get("amount",0)).replace(",","."))
