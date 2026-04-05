@@ -87,31 +87,6 @@ JUST_NUMBER_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-def _parse_amount_str(s: str) -> float | None:
-    """Умный парсер: '2262,33'→2262.33, '1,500'→1500, '3к'→3000, '1 500'→1500."""
-    if not s: return None
-    s = s.strip()
-    s = re.sub(r"\s*(?:₴|грн\.?|uah)\s*$", "", s, flags=re.IGNORECASE).strip()
-    s_nospace = s.replace(" ", "")
-    mult = 1
-    if re.search(r"к(?:р|ривень|уб)?$|тис", s_nospace, re.IGNORECASE):
-        mult = 1000
-        s_nospace = re.sub(r"[кКтТис]+.*$", "", s_nospace, flags=re.IGNORECASE)
-    # Определяем: запятая — дробная или тысячный разделитель
-    if "," in s_nospace and "." not in s_nospace:
-        m = re.match(r"^(\d+),(\d+)$", s_nospace)
-        if m and len(m.group(2)) == 3:
-            s_nospace = s_nospace.replace(",", "")   # тысячный: 1,500 → 1500
-        else:
-            s_nospace = s_nospace.replace(",", ".")  # дробный: 2262,33 → 2262.33
-    elif "." in s_nospace and "," in s_nospace:
-        # европейский: 1.500,50 → 1500.50
-        s_nospace = s_nospace.replace(".", "").replace(",", ".")
-    try:
-        return float(s_nospace) * mult
-    except:
-        return None
-
 # ── ВАЛЮТНЫЕ ПАТТЕРНЫ ─────────────────────────────────────────────────────────
 CURRENCY_AMOUNT_PATTERNS = re.compile(
     r"(\d[\d\s,\.]*)\s*"
@@ -257,12 +232,18 @@ def sum_records(records: list) -> float:
     return sum(float(r[k]) for r in records if r.get(k))
 
 def fix_cat(cat: str, desc: str = "") -> str:
+def fix_cat(cat: str, desc: str = "", keep_new: bool = False) -> str:
+    """Валидирует категорию. keep_new=True — вернуть как есть если не найдена (для новых категорий от LLM)."""
     cats = get_all_categories()
+    if not cat or cat.lower() == "другое":
+        return "Другое"
     if cat in cats: return cat
     cat_low = cat.lower().strip()
     for c in cats:
         if cat_low in c.lower() or c.lower() in cat_low:
             return c
+    if keep_new:
+        return cat.strip().capitalize()
     return "Другое"
 
 def validate_category(cat: str, desc: str = "") -> str:
@@ -373,6 +354,16 @@ def month_name(n: int, gen: bool = False) -> str:
 # ── БЮДЖЕТ / ЗАРПЛАТА ────────────────────────────────────────────────────────
 memory: dict = {}
 
+def get_budget_status(chat_id):
+    val = get_setting(f"budget_{chat_id}")
+    if not val: return None
+    try: budget = float(val)
+    except: return None
+    recs = get_current_month_records()
+    spent = sum_records(recs)
+    left = budget - spent
+    return {"budget":budget,"spent":spent,"left":left,"percent":min(int(spent/budget*100),100)}
+
 def get_salary_info(chat_id):
     val = get_setting(f"salary_{chat_id}")
     if not val: return None
@@ -381,63 +372,6 @@ def get_salary_info(chat_id):
 
 def set_salary_info(chat_id, day, amount=None):
     save_setting(f"salary_{chat_id}", json.dumps({"day":day,"amount":amount}))
-
-def get_salary_day(chat_id) -> int:
-    info = get_salary_info(chat_id)
-    return int(info["day"]) if info and info.get("day") else 1
-
-def get_period_start(chat_id) -> datetime:
-    """Начало текущего зарплатного периода."""
-    now = datetime.now(KYIV_TZ)
-    sal_day = get_salary_day(chat_id)
-    if now.day >= sal_day:
-        try:
-            return now.replace(day=sal_day, hour=0, minute=0, second=0, microsecond=0)
-        except ValueError:
-            return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    else:
-        # Зарплата ещё не была — берём прошлый месяц
-        first = now.replace(day=1)
-        prev_last = first - timedelta(days=1)
-        d = min(sal_day, prev_last.day)
-        return prev_last.replace(day=d, hour=0, minute=0, second=0, microsecond=0)
-
-def get_period_records(chat_id) -> list:
-    """Записи от дня зарплаты до сегодня."""
-    start = get_period_start(chat_id)
-    result = []
-    for r in get_all_records():
-        try:
-            d = datetime.strptime(r.get("Дата","")[:10], "%d.%m.%Y").replace(tzinfo=KYIV_TZ)
-            if d >= start: result.append(r)
-        except: pass
-    return result
-
-def get_yesterday_records() -> list:
-    yesterday = (datetime.now(KYIV_TZ) - timedelta(days=1)).strftime("%d.%m.%Y")
-    return [r for r in get_all_records() if r.get("Дата","").startswith(yesterday)]
-
-def get_budget_status(chat_id):
-    val = get_setting(f"budget_{chat_id}")
-    if not val: return None
-    try: budget = float(val)
-    except: return None
-    # Считаем расходы за зарплатный период
-    recs = get_period_records(chat_id)
-    spent = sum_records(recs)
-    left = budget - spent
-    now = datetime.now(KYIV_TZ)
-    sal_day = get_salary_day(chat_id)
-    if now.day < sal_day:
-        days_to_sal = sal_day - now.day
-    else:
-        nm = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
-        days_to_sal = max((nm.replace(day=min(sal_day, 28)) - now).days, 1)
-    return {
-        "budget": budget, "spent": spent, "left": left,
-        "percent": min(int(spent / budget * 100), 100),
-        "days_to_sal": days_to_sal,
-    }
 
 def build_salary_status(chat_id) -> str | None:
     info = get_salary_info(chat_id)
@@ -452,20 +386,18 @@ def build_salary_status(chat_id) -> str | None:
         nm = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
         next_sal = nm.replace(day=min(day, 28))
         days_left = (next_sal - now).days
-    period_start = get_period_start(chat_id)
-    spent = sum_records(get_period_records(chat_id))
+    spent = sum_records(get_current_month_records())
     lines = [f"💵 *День зарплаты — {day}-е число*\n"]
-    lines.append(f"📅 Период: с *{period_start.strftime('%d.%m')}*")
     if days_left == 0: lines.append("🎉 *Сегодня зарплата!*")
     elif days_left == 1: lines.append("⏰ *Завтра зарплата!*")
     else: lines.append(f"📅 До зарплаты: *{days_left} дней* ({next_sal.strftime('%d')} {month_name(next_sal.month, True)})")
-    lines.append(f"\n💸 Потрачено за период: *{fmt(spent)} ₴*")
+    lines.append(f"\n💸 Потрачено: *{fmt(spent)} ₴*")
     if amount:
-        left = float(amount) - spent
-        lines.append(f"💰 Зарплата: *{fmt(float(amount))} ₴*")
+        left = amount - spent
+        lines.append(f"💰 Зарплата: *{fmt(amount)} ₴*")
         lines.append(f"{'🟢' if left>0 else '🔴'} Осталось: *{fmt(left)} ₴*")
         if days_left > 0 and left > 0:
-            lines.append(f"📊 Можно тратить: *{fmt(left/max(days_left,1))} ₴/день*")
+            lines.append(f"📊 Можно тратить: *{fmt(left/days_left)} ₴/день*")
     return "\n".join(lines)
 
 # ── НАПОМИНАНИЯ ──────────────────────────────────────────────────────────────
@@ -832,7 +764,7 @@ def build_installments_msg() -> str:
         if inst.get("desc"): lines.append(f"   _{inst['desc']}_")
         lines.append("")
     return "\n".join(lines)
-      
+
 # ── GROQ / LLM ───────────────────────────────────────────────────────────────
 def transcribe(path: str) -> str:
     with open(path, "rb") as f:
@@ -866,11 +798,15 @@ def _extract_json(raw: str, bracket="[") -> str:
 PARSE_SYSTEM = """Ты — парсер финансовых записей. Извлеки ВСЕ траты из сообщения.
 
 КАТЕГОРИИ:
+- "Еда / продукты" — еда, напитки, рестораны, кафе, доставка, магазины, алкоголь, пиво, вино
 - "Еда / продукты" — еда, напитки, рестораны, кафе, доставка, магазины, алкоголь
 - "Транспорт" — бензин, заправки, такси, парковка, мойка, СТО, метро, автобус
+- "Развлечения" — игры, кино, стриминг, подписки, ставки, боулинг, концерты, бары, вечеринки
 - "Развлечения" — игры, кино, стриминг, подписки, ставки, боулинг, концерты
 - "Здоровье / аптека" — лекарства, аптека, врачи, массаж, парикмахер, маникюр, спортзал
 - "Никотин" — сигареты, снюс, вейп, кальян, ZYN, VELO
+- Также используй ДОПОЛНИТЕЛЬНЫЕ КАТЕГОРИИ если указаны ниже.
+- ВАЖНО: НЕ используй категорию "Другое"! Вместо этого придумай подходящую новую категорию на русском (1-2 слова), например: "Одежда", "Ремонт", "Подарки", "Питомец", "Косметика", "Техника", "Коммунальные" и т.д.
 - "Другое" — одежда, техника, коммунальные, интернет, телефон, подарки, ремонт
 
 ПРАВИЛА:
@@ -880,8 +816,10 @@ PARSE_SYSTEM = """Ты — парсер финансовых записей. И�
 4. "закинул на карту 500", "пополнение счета", "перевод" — НЕ трата, пропусти
 5. "дал/дав Имени сумма" — НЕ трата (это долг), пропусти
 6. emoji — подходящий эмодзи для описания
+7. Если трата не подходит ни под одну известную категорию — придумай новую категорию (не "Другое"!), добавь поле "new_category": true
 
 ТОЛЬКО JSON массив:
+[{"amount":<число>,"category":"<категория>","description":"<2-4 слова>","emoji":"<эмодзи>","new_category":<true/false>}]"""
 [{"amount":<число>,"category":"<категория>","description":"<2-4 слова>","emoji":"<эмодзи>"}]"""
 
 PARSE_EXAMPLES = [
@@ -927,26 +865,19 @@ def parse_expenses(text: str) -> list:
 
 # ── ФИНАНСОВЫЙ КОНТЕКСТ ───────────────────────────────────────────────────────
 def get_financial_context(chat_id) -> str:
-    now = datetime.now(KYIV_TZ)
-    period_start = get_period_start(chat_id)
-    period_recs = get_period_records(chat_id)
-    s = analyze_records(period_recs)
+    recs = get_current_month_records()
+    s = analyze_records(recs)
     bs = get_budget_status(chat_id)
     sal = get_salary_info(chat_id)
-    yesterday_recs = get_yesterday_records()
-    yesterday_spent = sum_records(yesterday_recs)
-    parts = [
-        f"Сегодня: {now.strftime('%d.%m.%Y')}",
-        f"Вчера ({(now-timedelta(days=1)).strftime('%d.%m')}): потрачено {fmt(yesterday_spent)} ₴",
-    ]
+    parts = [f"Сегодня: {datetime.now(KYIV_TZ).strftime('%d.%m.%Y')}"]
     if s:
-        parts.append(f"Период с {period_start.strftime('%d.%m')}: {fmt(s['total'])} ₴ ({s['count']} записей)")
-        cats = "; ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1])[:5])
-        parts.append(f"По категориям: {cats}")
+        parts.append(f"Траты за {month_name(datetime.now(KYIV_TZ).month)}: {fmt(s['total'])} ₴")
+        cats = "; ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1])[:4])
+        parts.append(f"Категории: {cats}")
     if bs:
         parts.append(f"Бюджет: {fmt(bs['budget'])}₴, использовано {bs['percent']}%, осталось {fmt(bs['left'])}₴")
     if sal:
-        parts.append(f"День зарплаты: {sal['day']}-е, сумма: {sal.get('amount','?')}₴")
+        parts.append(f"Зарплата: {sal.get('amount','?')}₴, {sal['day']}-е число")
     if debts:
         dl = "; ".join(f"{d['name']}: {format_amounts(d['amounts']).replace('*','')}" for d in list(debts.values())[:3])
         parts.append(f"Мне должны: {dl}")
@@ -963,6 +894,9 @@ async def ai_chat_response(chat_id, user_message: str) -> str:
     history = _ai_chat_history[chat_id]
     system = f"""Ты умный финансовый ИИ-ассистент. Отвечай кратко и по делу (3-5 предложений).
 Долги — это деньги которые ТЕБЕ должны другие люди. Будь дружелюбным, с эмодзи.
+
+КАТЕГОРИИ ПОЛЬЗОВАТЕЛЯ: {', '.join(get_all_categories())}
+ВАЖНО: Категория "Другое" не используется! Если пользователь просит изменить категории или убрать "Другое" — объясни, что бот автоматически предлагает новую подходящую категорию для каждой траты (например, пиво → "Еда / продукты" или "Развлечения", подарок → "Подарки" и т.д.). Если пользователь хочет добавить конкретную категорию — скажи ему написать: «Добавить категорию Название».
 
 ДАННЫЕ ПОЛЬЗОВАТЕЛЯ:
 {get_financial_context(chat_id)}"""
@@ -1215,63 +1149,28 @@ async def send_weekly_insight(context: ContextTypes.DEFAULT_TYPE):
 async def send_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
     cid = (context.job.data or {}).get("chat_id") or CHAT_ID
     if not cid: return
-    now = datetime.now(KYIV_TZ)
-    day_names = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
-    lines = [f"☀️ *Доброе утро! {now.strftime('%d.%m')} ({day_names[now.weekday()]})*\n"]
-
-    # Вчерашние траты — правильно берём вчерашний день
-    yesterday_recs = get_yesterday_records()
-    yesterday_spent = sum_records(yesterday_recs)
-    if yesterday_spent > 0:
-        lines.append(f"📌 Вчера потрачено: *{fmt(yesterday_spent)} ₴*")
-        # Топ категория вчера
-        by_cat: dict = {}
-        sk = get_sum_key(yesterday_recs) if yesterday_recs else "Сумма (₴)"
-        for r in yesterday_recs:
-            cat = r.get("Категория","?")
-            try: by_cat[cat] = by_cat.get(cat,0) + float(r.get(sk,0) or 0)
-            except: pass
-        if by_cat:
-            top = max(by_cat, key=by_cat.get)
-            lines.append(f"   └ {get_category_emoji(top)} {top}: {fmt(by_cat[top])} ₴")
-    else:
-        lines.append("📌 Вчера трат не было 👌")
-
-    lines.append("")
-
-    # Бюджет с прогресс-баром
     bs = get_budget_status(cid)
     sal = get_salary_info(cid)
+    now = datetime.now(KYIV_TZ)
+    lines = [f"☀️ *Доброе утро, {now.strftime('%d.%m')}!*\n"]
+    today_spent = sum_records(get_today_records())
+    if today_spent > 0:
+        lines.append(f"📌 Вчера потрачено: *{fmt(today_spent)} ₴*")
     if bs:
-        pct = bs["percent"]
-        bar = "█"*(pct//10) + "░"*(10-pct//10)
-        icon = "🟢" if pct < 70 else "🟡" if pct < 90 else "🔴"
-        lines.append(f"{icon} Бюджет: [{bar}] *{pct}%*")
-        lines.append(f"   {fmt(bs['spent'])} / {fmt(bs['budget'])} ₴")
-        if bs["left"] > 0 and bs["days_to_sal"] > 0:
-            daily = bs["left"] / bs["days_to_sal"]
-            lines.append(f"   💡 Лимит: *{fmt(daily)} ₴/день* (до зарплаты {bs['days_to_sal']} дн.)")
-        elif bs["left"] <= 0:
-            lines.append(f"   ❗ Превышен на *{fmt(abs(bs['left']))} ₴*")
+        days_left = 30 - now.day + 1
+        daily_limit = bs["left"] / max(days_left, 1)
+        lines.append(f"💰 Бюджет: *{bs['percent']}%* использован")
+        lines.append(f"📊 Лимит сегодня: *{fmt(daily_limit)} ₴*")
     elif sal and sal.get("amount"):
-        sal_amount = float(sal["amount"])
-        spent = sum_records(get_period_records(cid))
-        left = sal_amount - spent
-        pct = min(int(spent / sal_amount * 100), 100)
-        bar = "█"*(pct//10) + "░"*(10-pct//10)
-        icon = "🟢" if pct < 70 else "🟡" if pct < 90 else "🔴"
-        lines.append(f"{icon} Зарплата: [{bar}] *{pct}%*")
-        lines.append(f"   {fmt(spent)} / {fmt(sal_amount)} ₴")
+        spent = sum_records(get_current_month_records())
+        left = float(sal["amount"]) - spent
         sal_day = sal["day"]
-        if now.day < sal_day:
-            days_to = sal_day - now.day
-        else:
-            nm = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
-            days_to = max((nm.replace(day=min(sal_day,28)) - now).days, 1)
-        if left > 0 and days_to > 0:
-            lines.append(f"   💡 Можно тратить: *{fmt(left/days_to)} ₴/день*")
-
-    await context.bot.send_message(chat_id=cid, text="\n".join(lines), parse_mode="Markdown")
+        days_left = (sal_day - now.day) if now.day < sal_day else (
+            (datetime.now(KYIV_TZ).replace(day=1) + timedelta(days=32)).replace(day=sal_day) - now).days
+        if days_left > 0:
+            lines.append(f"💵 До зарплаты *{fmt(left/max(days_left,1))} ₴/день*")
+    if len(lines) > 1:
+        await context.bot.send_message(chat_id=cid, text="\n".join(lines), parse_mode="Markdown")
 
 # ── КЛАВИАТУРА ───────────────────────────────────────────────────────────────
 MAIN_KB = ReplyKeyboardMarkup([
@@ -1296,6 +1195,7 @@ OTHER_KB = inline_kb([
     [("💡 Советы","menu_advice"),("💵 Зарплата","menu_salary")],
     [("🪞 Прошлое я","menu_past"),("💸 Привычки","menu_habits")],
     [("⏰ Напоминания","menu_reminder"),("🏷 Категории","menu_categories")],
+    [("💳 Рассрочки","menu_installments")],
 ])
 REMINDER_KB = inline_kb([
     [("1 день","reminder_1"),("3 дня","reminder_3")],
@@ -1432,6 +1332,14 @@ async def cmd_rates(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await build_rates_msg()
     await update.message.reply_text(msg, parse_mode="Markdown")
 
+async def cmd_installments(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = build_installments_msg()
+    if installments:
+        kb = inline_kb([[("💳 Внести платёж","installment_pay_menu"),("🗑 Закрыть рассрочку","installment_close_menu")]])
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎙 Распознаю...")
     try:
@@ -1464,7 +1372,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "⚙️ Прочее":
         await update.message.reply_text("⚙️ *Прочее*:", parse_mode="Markdown", reply_markup=OTHER_KB); return
     if text == "🎯 Цели": await cmd_goals(update, context); return
-# ── ПРИОРИТЕТ: частичное погашение долга ────────────────────────────────
+
+    # ── ПРИОРИТЕТ: частичное погашение долга ────────────────────────────────
     if "partial_debt_id" in context.user_data:
         did = context.user_data.get("partial_debt_id")
         idx = context.user_data.get("partial_amt_idx", 0)
@@ -1524,16 +1433,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del context.user_data["goal_deposit_id"]
 
     # ── ПРОСТО ЧИСЛО: спрашиваем категорию ──────────────────────────────────
+    # Срабатывает когда пользователь пишет только сумму без описания
+    # Примеры: "1650", "500", "3к", "1.5к", "200 грн"
     just_number_match = JUST_NUMBER_PATTERN.match(text.strip())
     if just_number_match:
-        amount_val = _parse_amount_str(just_number_match.group(1))
-        if amount_val and amount_val > 0:
-            set_ctx(chat_id, pending_amount=amount_val)
-            kb = build_category_kb(amount_val)
-            await update.message.reply_text(
-                f"💰 *{fmt(amount_val)} ₴* — что это?\n\nВыбери категорию:",
-                parse_mode="Markdown", reply_markup=kb)
-            return
+        amount_raw = just_number_match.group(1).strip().replace(" ", "").replace(",", ".")
+        mult = 1000 if re.search(r"[кК](?:р|ривень|уб)?$|тис", amount_raw, re.IGNORECASE) else 1
+        amount_clean_str = re.sub(r"[кКтТис]+.*$", "", amount_raw, flags=re.IGNORECASE)
+        try:
+            amount_val = float(amount_clean_str) * mult
+            if amount_val > 0:
+                set_ctx(chat_id, pending_amount=amount_val)
+                kb = build_category_kb(amount_val)
+                await update.message.reply_text(
+                    f"💰 *{fmt(amount_val)} ₴* — что это?\n\nВыбери категорию:",
+                    parse_mode="Markdown",
+                    reply_markup=kb
+                )
+                return
+        except (ValueError, TypeError):
+            pass  # не смогли распарсить — идём дальше обычным путём
 
     # Быстрый undo
     if re.search(r"(удал|убер|скасу|відмін|cancel|undo).*(останн|последн|last|запис|трат|витрат)", text, re.IGNORECASE) or \
@@ -1567,53 +1486,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✅ Категория {em} *{cat_name}* добавлена!\nТеперь пиши: «{cat_name} 1500»",
                 parse_mode="Markdown"); return
-           if data == "installment_pay_menu":
-        if not installments: await query.edit_message_text("💳 Рассрочек нет."); return
-        kb = [[(f"💳 {v['name']} — {fmt(v['monthly'])} ₴", f"inst_pay_{k}")] for k, v in installments.items()]
-        kb.append([("← Назад", "inst_back")])
-        await query.edit_message_text("Выбери рассрочку для платежа:", reply_markup=inline_kb(kb)); return
-
-    if data.startswith("inst_pay_"):
-        iid = data[9:]
-        if iid not in installments: await query.edit_message_text("Рассрочка не найдена."); return
-        inst = installments[iid]
-        pay = inst["monthly"]
-        inst["paid"] = min(inst["paid"] + pay, inst["total"])
-        inst["payments_left"] = max(inst["payments_left"] - 1, 0)
-        update_installment_in_sheet(iid, inst["paid"], inst["payments_left"])
-        date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
-        save_expense(date, pay, "Рассрочка", f"Рассрочка {inst['name']}", f"платёж рассрочка {inst['name']}")
-        pct = min(int(inst["paid"] / inst["total"] * 100), 100) if inst["total"] > 0 else 0
-        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        msg = (f"✅ *Платёж {fmt(pay)} ₴* по «{inst['name']}» записан!\n\n"
-               f"[{bar}] {pct}%\n"
-               f"Выплачено: {fmt(inst['paid'])} / {fmt(inst['total'])} ₴\n"
-               f"Осталось платежей: {inst['payments_left']}")
-        if inst["paid"] >= inst["total"]:
-            update_installment_in_sheet(iid, inst["paid"], 0, "закрыта")
-            installments.pop(iid)
-            msg += "\n\n🎉 *Рассрочка выплачена!*"
-        await query.edit_message_text(msg, parse_mode="Markdown"); return
-
-    if data == "installment_close_menu":
-        if not installments: await query.edit_message_text("💳 Рассрочек нет."); return
-        kb = [[(f"🗑 {v['name']}", f"inst_close_{k}")] for k, v in installments.items()]
-        kb.append([("← Назад", "inst_back")])
-        await query.edit_message_text("Какую рассрочку закрыть?", reply_markup=inline_kb(kb)); return
-
-    if data.startswith("inst_close_"):
-        iid = data[11:]
-        if iid in installments:
-            inst = installments.pop(iid)
-            update_installment_in_sheet(iid, inst["paid"], 0, "закрыта")
-            await query.edit_message_text(f"🗑 Рассрочка *{inst['name']}* закрыта.", parse_mode="Markdown")
-        return
-
-    if data == "inst_back":
-        msg = build_installments_msg()
-        kb = inline_kb([[("💳 Внести платёж","installment_pay_menu"),("🗑 Закрыть рассрочку","installment_close_menu")]])
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=kb); return
-
 
     await process(update, context, text)
 
@@ -1636,7 +1508,8 @@ def _regex_route(text: str) -> list | None:
     if CURRENCY_AMOUNT_PATTERNS.search(t):
         logger.info(f"RegexRouter: пропуск (валюта) '{t[:50]}'")
         return None
-# Рассрочка: "Рассрочка Колёса 12000 на 12 месяцев 1000" или "Рассрочка Колёса 12000 12мес"
+
+    # Рассрочка: "Рассрочка Колёса 12000 на 12 месяцев 1000" или "Рассрочка Колёса 12000 12мес"
     m = re.match(
         r"рассрочк[аеу]?\s+(.+?)\s+(\d[\d\s.,]*(?:\s*к)?)\s+"
         r"(?:на\s+)?(\d{1,3})\s*(?:мес\w*|платеж\w*|взнос\w*)\s*(\d[\d\s.,]*(?:\s*к)?)?",
@@ -1655,7 +1528,7 @@ def _regex_route(text: str) -> list | None:
             if total > 0 and months > 0:
                 return [{"action":"installment_new","name":name,"total":total,"monthly":monthly,"months":months}]
         except: pass
-          
+
     # Зарплата
     m = re.search(
         r"зарплат[аы]?\s+(\d{1,2})[-\s]?(?:го|числа|ого)?\s+(\d[\d\s.,]*(?:\s*к)?)"
@@ -1699,7 +1572,11 @@ def _regex_route(text: str) -> list | None:
     if m:
         g = m.groups()
         def parse_amount(s):
-            return _parse_amount_str(s)
+            s = s.strip().replace(" ","").replace(",",".")
+            mult = 1000 if re.search(r"к(?:р|ривень|уб)?$|тис", s, re.IGNORECASE) else 1
+            s = re.sub(r"[кКтТис]+.*$","",s,flags=re.IGNORECASE)
+            try: return float(s) * mult
+            except: return None
         amt = parse_amount(g[1]) or parse_amount(g[0])
         desc = (g[0] if parse_amount(g[1]) else g[1]).strip().lower()
         if amt and amt > 0 and desc and not re.match(r"^\d", desc):
@@ -1755,7 +1632,9 @@ installment_new: {{"action":"installment_new","name":"N","total":N,"monthly":N,"
 installment_pay: {{"action":"installment_pay","name":"N","amount":N}}
 question: {{"action":"question","text":"T"}}
 
-КАТЕГОРИИ: "Еда / продукты","Транспорт","Развлечения","Здоровье / аптека","Никотин","Другое"
+КАТЕГОРИИ: "Еда / продукты","Транспорт","Развлечения","Здоровье / аптека","Никотин"
+ВАЖНО: НЕ используй категорию "Другое"! Придумай подходящую новую категорию (1-2 слова), например: "Одежда", "Подарки", "Ремонт", "Техника", "Коммунальные", "Питомец" и т.д. Если категория новая — добавь "new_category": true в объект расхода.
+ВАЖНО: НЕ используй "Другое"! Придумай подходящую новую категорию (1-2 слова рус).
 Пользовательские: {user_cats}
 МНЕ ДОЛЖНЫ: {debts} | ЦЕЛИ: {goals} | КОНТЕКСТ: {context}
 
@@ -1842,18 +1721,34 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
         month_recs = get_current_month_records()
         lines = ["✅ *Записано!*\n"]
+        new_cats_to_suggest = []  # категории, которые стоит предложить сохранить
+        new_cats_to_suggest = []
         for exp in expenses:
             amount = float(str(exp.get("amount",0)).replace(",","."))
             if amount <= 0: continue
-            cat = fix_cat(exp.get("category","Другое"))
+            raw_cat = exp.get("category","")
+            is_new_cat = exp.get("new_category", False) or (raw_cat and raw_cat not in get_all_categories() and raw_cat.lower() != "другое")
+            cat = fix_cat(raw_cat) if not is_new_cat else (raw_cat.strip().capitalize() or "Другое")
+            # Если модель всё-таки вернула "Другое" — помечаем как новую
+            if cat == "Другое" and raw_cat and raw_cat.lower() != "другое":
+                cat = raw_cat.strip().capitalize()
+                is_new_cat = True
+            raw_cat = (exp.get("category","") or "").strip()
+            # Используем keep_new=True чтобы не потерять категорию от LLM
+            cat = fix_cat(raw_cat, keep_new=True) if raw_cat else "Другое"
+            is_new = cat not in get_all_categories() and cat != "Другое"
             desc = exp.get("description","—")
-            emoji = exp.get("emoji","")
+            emoji = exp.get("emoji","") or get_category_emoji(cat)
             save_expense(date, amount, cat, desc, text)
             lines.append(f"{emoji} *{desc}* — *{fmt(amount)} ₴*\n   _{get_category_emoji(cat)} {cat}_")
+            if is_new_cat and cat not in get_all_categories() and cat not in new_cats_to_suggest:
+            if is_new and cat not in [c for c,_ in new_cats_to_suggest]:
+                new_cats_to_suggest.append((cat, emoji))
         if len(expenses) > 1:
             total = sum(float(str(e.get("amount",0)).replace(",",".")) for e in expenses)
             lines.append(f"\n💰 *Итого: {fmt(total)} ₴*")
         cat0 = fix_cat(expenses[0].get("category","Другое"))
+        cat0 = fix_cat(expenses[0].get("category","Другое"), keep_new=True)
         sk = get_sum_key(month_recs)
         cat_total = sum(float(r[sk]) for r in month_recs if fix_cat(r.get("Категория",""))==cat0 and r.get(sk))
         if cat_total > 0:
@@ -1864,6 +1759,23 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
             if pct >= 90: lines.append(f"\n🔴 *Бюджет на {pct}%!*")
             elif pct >= 70: lines.append(f"\n🟡 Бюджет на {pct}%")
         set_ctx(chat_id, last_action="expense")
+        # Предлагаем сохранить новую категорию
+        if new_cats_to_suggest and update is not None:
+            for new_cat, new_emoji in new_cats_to_suggest:
+                em = new_emoji or get_category_emoji(new_cat)
+                kb = inline_kb([
+                    [(f"✅ Да, добавить «{new_cat}»", f"savecat_{new_cat}")],
+                    [("❌ Нет, не нужно", "savecat_skip")],
+                ])
+                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+                await update.message.reply_text(
+                    "\n".join(lines), parse_mode="Markdown")
+                await update.message.reply_text(
+                    f"💡 Вижу новую категорию {em} *{new_cat}*.\nДобавить её в список категорий, чтобы использовать в будущем?",
+                    f"💡 Вижу новую категорию {em} *{new_cat}*.\nДобавить её в список категорий?",
+                    parse_mode="Markdown", reply_markup=kb)
+                return None  # уже отправили
+                return None
         return "\n".join(lines)
 
     elif action == "expense_delete":
@@ -2094,7 +2006,8 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         save_user_category(name, emoji_c)
         em = EMOJI_MAP.get(name, get_category_emoji(name))
         return f"✅ Категория {em} *{name}* добавлена!\nТеперь пиши: «{name} 1500»"
- elif action == "installment_new":
+
+    elif action == "installment_new":
         name = route.get("name","Рассрочка").strip().capitalize()
         total = float(str(route.get("total",0)).replace(",","."))
         monthly = float(str(route.get("monthly",0)).replace(",","."))
@@ -2142,7 +2055,6 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
             msg += "\n\n🎉 *Рассрочка полностью выплачена!*"
         return msg
 
-  
     elif action == "expense_edit":
         old_cat = route.get("old_category","")
         new_cat = route.get("new_category","").strip().capitalize()
@@ -2238,15 +2150,31 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
             if expenses:
                 date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
                 lines = ["✅ *Записано!*\n"]
+                new_cats_fallback = []
                 for exp in expenses:
                     amount = float(str(exp.get("amount",0)))
                     if amount <= 0: continue
                     cat = fix_cat(exp.get("category","Другое"))
+                    raw_cat = (exp.get("category","") or "").strip()
+                    cat = fix_cat(raw_cat, keep_new=True) if raw_cat else "Другое"
+                    is_new = cat not in get_all_categories() and cat != "Другое"
                     desc = exp.get("description","—")
                     emoji = exp.get("emoji","")
                     save_expense(date, amount, cat, desc, text)
                     lines.append(f"{emoji} *{desc}* — *{fmt(amount)} ₴*\n   _{get_category_emoji(cat)} {cat}_")
+                    if is_new and cat not in [c for c,_ in new_cats_fallback]:
+                        new_cats_fallback.append((cat, emoji or get_category_emoji(cat)))
                 responses.append("\n".join(lines))
+                # Предлагаем сохранить новые категории
+                for new_cat, new_emoji in new_cats_fallback:
+                    em = new_emoji or get_category_emoji(new_cat)
+                    kb = inline_kb([
+                        [(f"✅ Да, добавить «{new_cat}»", f"savecat_{new_cat}")],
+                        [("❌ Нет, не нужно", "savecat_skip")],
+                    ])
+                    await update.message.reply_text(
+                        f"💡 Вижу новую категорию {em} *{new_cat}*.\nДобавить её в список?",
+                        parse_mode="Markdown", reply_markup=kb)
             else:
                 responses.append(
                     "🤔 Не понял. Попробуй:\n"
@@ -2353,7 +2281,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not _user_categories:
                 lines.append("\n_Добавь свою: «Добавь категорию Инвестиции»_")
             await send("\n".join(lines), parse_mode="Markdown")
-          elif action == "installments":
+        elif action == "installments":
             msg = build_installments_msg()
             if installments:
                 kb = inline_kb([[("💳 Внести платёж","installment_pay_menu"),("🗑 Закрыть рассрочку","installment_close_menu")]])
@@ -2523,6 +2451,68 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 data={"debt_id":did,"chat_id":chat_id}, name=f"debt_{did}")
             await query.edit_message_text(f"⏰ Напомню о *{d['name']}* через {reminder_label(chat_id)}.", parse_mode="Markdown"); return
 
+    if data == "savecat_skip":
+        await query.edit_message_text("👍 Окей, категория не сохранена."); return
+
+    if data.startswith("savecat_"):
+        cat_name = data[8:].strip()
+        if cat_name and cat_name.lower() not in [c.lower() for c in get_all_categories()]:
+            save_user_category(cat_name)
+            em = get_category_emoji(cat_name)
+            await query.edit_message_text(
+                f"✅ Категория {em} *{cat_name}* добавлена!\nТеперь пиши, например: «{cat_name} 500»",
+                parse_mode="Markdown")
+        else:
+            await query.edit_message_text(f"ℹ️ Категория *{cat_name}* уже есть в списке.", parse_mode="Markdown")
+        return
+
+    if data == "installment_pay_menu":
+        if not installments: await query.edit_message_text("💳 Рассрочек нет."); return
+        kb = [[(f"💳 {v['name']} — {fmt(v['monthly'])} ₴", f"inst_pay_{k}")] for k, v in installments.items()]
+        kb.append([("← Назад", "inst_back")])
+        await query.edit_message_text("Выбери рассрочку для платежа:", reply_markup=inline_kb(kb)); return
+
+    if data.startswith("inst_pay_"):
+        iid = data[9:]
+        if iid not in installments: await query.edit_message_text("Рассрочка не найдена."); return
+        inst = installments[iid]
+        pay = inst["monthly"]
+        inst["paid"] = min(inst["paid"] + pay, inst["total"])
+        inst["payments_left"] = max(inst["payments_left"] - 1, 0)
+        update_installment_in_sheet(iid, inst["paid"], inst["payments_left"])
+        date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
+        save_expense(date, pay, "Рассрочка", f"Рассрочка {inst['name']}", f"платёж рассрочка {inst['name']}")
+        pct = min(int(inst["paid"] / inst["total"] * 100), 100) if inst["total"] > 0 else 0
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        msg = (f"✅ *Платёж {fmt(pay)} ₴* по «{inst['name']}» записан!\n\n"
+               f"[{bar}] {pct}%\n"
+               f"Выплачено: {fmt(inst['paid'])} / {fmt(inst['total'])} ₴\n"
+               f"Осталось платежей: {inst['payments_left']}")
+        if inst["paid"] >= inst["total"]:
+            update_installment_in_sheet(iid, inst["paid"], 0, "закрыта")
+            installments.pop(iid)
+            msg += "\n\n🎉 *Рассрочка выплачена!*"
+        await query.edit_message_text(msg, parse_mode="Markdown"); return
+
+    if data == "installment_close_menu":
+        if not installments: await query.edit_message_text("💳 Рассрочек нет."); return
+        kb = [[(f"🗑 {v['name']}", f"inst_close_{k}")] for k, v in installments.items()]
+        kb.append([("← Назад", "inst_back")])
+        await query.edit_message_text("Какую рассрочку закрыть?", reply_markup=inline_kb(kb)); return
+
+    if data.startswith("inst_close_"):
+        iid = data[11:]
+        if iid in installments:
+            inst = installments.pop(iid)
+            update_installment_in_sheet(iid, inst["paid"], 0, "закрыта")
+            await query.edit_message_text(f"🗑 Рассрочка *{inst['name']}* закрыта.", parse_mode="Markdown")
+        return
+
+    if data == "inst_back":
+        msg = build_installments_msg()
+        kb = inline_kb([[("💳 Внести платёж","installment_pay_menu"),("🗑 Закрыть рассрочку","installment_close_menu")]])
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=kb); return
+
     if data == "back":
         await query.edit_message_text("Выбери раздел:", reply_markup=inline_kb([
             [("💰 Финансы","menu_stats"),("📊 Аналитика","menu_week")],
@@ -2539,6 +2529,7 @@ def main():
         ("month",cmd_month),("budget",cmd_budget),("salary",cmd_salary),
         ("debts",cmd_debts),("reminder",cmd_reminder),("goals",cmd_goals),
         ("rates",cmd_rates),
+        ("rates",cmd_rates),("installments",cmd_installments),
     ]:
         app.add_handler(CommandHandler(cmd, handler))
 
@@ -2551,12 +2542,14 @@ def main():
     load_user_categories(); time.sleep(1)
     load_debts(); time.sleep(1)
     load_goals()
+    load_goals(); time.sleep(1)
+    load_installments()
 
     if CHAT_ID and app.job_queue:
         app.job_queue.run_daily(send_weekly_insight, time=dtime(19,0), days=(4,), data={"chat_id":CHAT_ID})
-        app.job_queue.run_daily(send_morning_briefing, time=dtime(6,0), data={"chat_id":CHAT_ID})
-        # dtime(6,0) = 06:00 UTC = 09:00 Киев (UTC+3 летом). Зимой UTC+2 → поменяй на dtime(7,0)
+        app.job_queue.run_daily(send_morning_briefing, time=dtime(9,0), data={"chat_id":CHAT_ID})
 
+    logger.info("AI-агент запущен! v5.7 🤖")
     logger.info("AI-агент запущен! v5.8 🤖")
     app.run_polling()
 
