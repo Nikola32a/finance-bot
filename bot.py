@@ -2612,7 +2612,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += "\n\n🎉 *Рассрочка выплачена!*"
         await query.edit_message_text(msg, parse_mode="Markdown"); return
 
-    if data == "installment_close_menu":
     if data == "inst_close_menu":
         if not installments: await query.edit_message_text("💳 Рассрочек нет."); return
         kb = [[(f"🗑 {v['name']}", f"inst_close_{k}")] for k,v in installments.items()]
