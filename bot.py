@@ -2374,7 +2374,7 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
                 f"📅 Каждое *{day}-е* число\n"
                 f"_{category}_\n\n"
                 f"_Буду автоматически записывать трату каждый месяц {day}-го числа_")
-       
+
     elif action == "question":
         q = route.get("text", text)
         return await ai_chat_response(chat_id, q)
