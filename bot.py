@@ -467,7 +467,7 @@ def build_salary_status(chat_id) -> str | None:
     spent = sum_records(get_period_records(chat_id))
     period_start = get_period_start(chat_id)
     lines = [f"💵 *День зарплаты — {day}-е число*\n"]
-     lines.append(f"📅 Период: с *{period_start.strftime('%d.%m')}*")
+    lines.append(f"📅 Период: с *{period_start.strftime('%d.%m')}*")
     if days_left == 0: lines.append("🎉 *Сегодня зарплата!*")
     elif days_left == 1: lines.append("⏰ *Завтра зарплата!*")
     else: lines.append(f"📅 До зарплаты: *{days_left} дней* ({next_sal.strftime('%d')} {month_name(next_sal.month, True)})")
