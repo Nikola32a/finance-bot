@@ -259,7 +259,7 @@ def sum_records(records: list) -> float:
     k = get_sum_key(records)
     return sum(float(r[k]) for r in records if r.get(k))
 
-def fix_cat(cat: str, desc: str = "", keep_new: bool = True) -> str:
+def fix_cat(cat: str, desc: str = "", keep_new: bool = False) -> str:
 
     """Нормализует категорию. keep_new=True — не сбрасывать в 'Другое' если категория новая от LLM."""
     cats = get_all_categories()
@@ -796,6 +796,7 @@ def build_debts_msg() -> str:
 # ── РАССРОЧКА ─────────────────────────────────────────────────────────────────
 installments: dict = {}
 installment_counter = [0]
+memory: dict = {}
 def _installments_sheet():
     sh = _get_worksheet("Рассрочка")
     if not sh.get_all_values():
@@ -852,13 +853,13 @@ def build_installments_msg() -> str:
 
 # ── РЕГУЛЯРНЫЕ ПЛАТЕЖИ ────────────────────────────────────────────────────────
 recurring: dict = {}
+memory: dict = {}
 def _recurring_sheet():
     sh = _get_worksheet("Регулярные")
     if not sh.get_all_values():
         sh.insert_row(["ID","Название","Сумма","День","Категория","Emoji","Статус"], 1)
     return sh
-_recurring_counter = [0]
-  
+
 def load_recurring():
     try:
         for r in _recurring_sheet().get_all_records():
@@ -871,8 +872,6 @@ def load_recurring():
                 "category": r.get("Категория", "Другое"),
                 "emoji": r.get("Emoji", "🔄"),
             }
-            try: _recurring_counter[0] = max(_recurring_counter[0], int(r["ID"]))
-            except: pass
     except Exception as e:
         logger.error(f"load_recurring: {e}")
 
@@ -888,6 +887,7 @@ def delete_recurring_from_sheet(rid):
                 sh.update_cell(i, 7, "удалён"); return
     except Exception as e: logger.error(f"delete_recurring: {e}")
 
+_recurring_counter = [0]
 
 def build_recurring_msg() -> str:
     if not recurring:
@@ -999,7 +999,7 @@ def parse_expenses(text: str) -> list:
                 amt = float(str(item.get("amount","0")).replace(",","."))
                 if amt <= 0: continue
                 item["amount"] = amt
-                item["category"] = fix_cat(item.get("category",""), keep_new=True)
+                item["category"] = fix_cat(item.get("category","Другое"))
                 validated.append(item)
             except: continue
         return validated
@@ -2483,7 +2483,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if fix_cat(r.get("Категория", "")) == cat and r.get(sk)
                 )
 
-                msg = (f"✅ *Записано!*\n\n{emoji} *{cat}* — *{fmt(amount)} ₴*")
+                msg = (
+                    f"✅ *Записано!*\n\n"
+                    f"{emoji} *{cat}* — *{fmt(amount)} ₴*"
+                )
                 if cat_total > 0:
                     msg += f"\n\n_{emoji} {cat} за месяц: *{fmt(cat_total)} ₴*_"
 
