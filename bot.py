@@ -768,6 +768,71 @@ def build_debts_msg() -> str:
                 lines.append(f"💰 Итого в {sym}: *{fmt(totals[cur])} {sym}*")
     return "\n".join(lines)
 
+# ── РАССРОЧКА ─────────────────────────────────────────────────────────────────
+installments: dict = {}
+installment_counter = [0]
+
+def _installments_sheet():
+    sh = _get_worksheet("Рассрочка")
+    if not sh.get_all_values():
+        sh.insert_row(["ID","Название","Общая сумма","Ежемесячный платёж","Выплачено","Осталось платежей","Дата начала","Статус","Описание"], 1)
+    return sh
+
+def load_installments():
+    try:
+        for r in _installments_sheet().get_all_records():
+            if r.get("Статус") != "активна": continue
+            iid = str(r["ID"])
+            installments[iid] = {
+                "name": r["Название"],
+                "total": float(r.get("Общая сумма", 0)),
+                "monthly": float(r.get("Ежемесячный платёж", 0)),
+                "paid": float(r.get("Выплачено", 0)),
+                "payments_left": int(r.get("Осталось платежей", 0)),
+                "date": r["Дата начала"],
+                "desc": r.get("Описание", ""),
+            }
+            try: installment_counter[0] = max(installment_counter[0], int(r["ID"]))
+            except: pass
+    except Exception as e:
+        logger.error(f"load_installments: {e}")
+
+def save_installment_to_sheet(iid, name, total, monthly, paid, payments_left, date, desc=""):
+    try:
+        left = total - paid
+        _installments_sheet().append_row([iid, name, total, monthly, paid, payments_left, date, "активна", desc])
+    except Exception as e: logger.error(f"save_installment: {e}")
+
+def update_installment_in_sheet(iid, paid, payments_left, status="активна"):
+    try:
+        sh = _installments_sheet()
+        for i, r in enumerate(sh.get_all_records(), start=2):
+            if str(r.get("ID")) == str(iid):
+                sh.update_cell(i, 5, paid)
+                sh.update_cell(i, 6, payments_left)
+                sh.update_cell(i, 8, status)
+                return
+    except Exception as e: logger.error(f"update_installment: {e}")
+
+def build_installments_msg() -> str:
+    if not installments: return "💳 Активных рассрочек нет.\n\nДобавь: «Рассрочка Колёса 12000 на 12 месяцев 1000»"
+    lines = ["💳 *Мои рассрочки:*\n"]
+    for iid, inst in installments.items():
+        paid = inst["paid"]
+        total = inst["total"]
+        monthly = inst["monthly"]
+        pl = inst["payments_left"]
+        pct = min(int(paid / total * 100), 100) if total > 0 else 0
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        left_sum = max(total - paid, 0)
+        lines.append(f"💳 *{inst['name']}*")
+        lines.append(f"   [{bar}] {pct}%")
+        lines.append(f"   Выплачено: {fmt(paid)} / {fmt(total)} ₴")
+        lines.append(f"   Ежемесячно: *{fmt(monthly)} ₴* × {pl} платежей осталось")
+        if inst.get("desc"): lines.append(f"   _{inst['desc']}_")
+        lines.append("")
+    return "\n".join(lines)
+      
 # ── GROQ / LLM ───────────────────────────────────────────────────────────────
 def transcribe(path: str) -> str:
     with open(path, "rb") as f:
@@ -1399,6 +1464,64 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "⚙️ Прочее":
         await update.message.reply_text("⚙️ *Прочее*:", parse_mode="Markdown", reply_markup=OTHER_KB); return
     if text == "🎯 Цели": await cmd_goals(update, context); return
+# ── ПРИОРИТЕТ: частичное погашение долга ────────────────────────────────
+    if "partial_debt_id" in context.user_data:
+        did = context.user_data.get("partial_debt_id")
+        idx = context.user_data.get("partial_amt_idx", 0)
+        try:
+            amount = float(text.strip().replace(",", ".").replace(" ", ""))
+            if amount > 0 and did in debts:
+                ex_ams = list(debts[did].get("amounts", []))
+                if idx < len(ex_ams):
+                    ea = ex_ams[idx]
+                    sym = CURRENCY_SYMBOLS.get(ea.get("currency", "UAH"), "₴")
+                    new_val = float(ea["amount"]) - amount
+                    d = debts[did]
+                    if new_val <= 0:
+                        ex_ams = [a for i, a in enumerate(ex_ams) if i != idx]
+                        msg = f"✅ *{d['name']}* вернул *{fmt(amount)} {sym}*\n💰 {sym}: долг закрыт"
+                    else:
+                        ea["amount"] = new_val
+                        msg = f"✅ *{d['name']}* вернул *{fmt(amount)} {sym}*\n📊 Остаток: *{fmt(new_val)} {sym}*"
+                    if not ex_ams:
+                        debts.pop(did); mark_paid(did)
+                        msg += "\n\n🎉 *Долг полностью закрыт!*"
+                    else:
+                        debts[did]["amounts"] = ex_ams
+                        update_debt_amounts(did, ex_ams)
+                    del context.user_data["partial_debt_id"]
+                    context.user_data.pop("partial_amt_idx", None)
+                    await update.message.reply_text(msg, parse_mode="Markdown")
+                    return
+        except (ValueError, TypeError):
+            pass  # не число — идём дальше, но не удаляем состояние
+        # Если ввели не число — напомнить
+        if not re.match(r"^\s*[\d.,\s]+\s*$", text):
+            del context.user_data["partial_debt_id"]
+            context.user_data.pop("partial_amt_idx", None)
+
+    # ── ПРИОРИТЕТ: пополнение цели ──────────────────────────────────────────
+    if "goal_deposit_id" in context.user_data:
+        gid = context.user_data.get("goal_deposit_id")
+        try:
+            amount = float(text.strip().replace(",", ".").replace(" ", ""))
+            if amount > 0 and gid in goals:
+                g = goals[gid]
+                g["saved"] = min(g["saved"] + amount, g["target"])
+                update_goal_saved(gid, g["saved"])
+                pct = min(int(g["saved"] / g["target"] * 100), 100)
+                bar = build_goal_bar(g["saved"], g["target"])
+                msg = f"🎯 *{g['name']}*\n[{bar}] {pct}%\n{fmt(g['saved'])} / {fmt(g['target'])} ₴"
+                if g["saved"] >= g["target"]:
+                    msg += "\n\n🎉 *Цель достигнута!*"
+                    goals.pop(gid); close_goal(gid)
+                del context.user_data["goal_deposit_id"]
+                await update.message.reply_text(msg, parse_mode="Markdown")
+                return
+        except (ValueError, TypeError):
+            pass
+        if not re.match(r"^\s*[\d.,\s]+\s*$", text):
+            del context.user_data["goal_deposit_id"]
 
     # ── ПРОСТО ЧИСЛО: спрашиваем категорию ──────────────────────────────────
     just_number_match = JUST_NUMBER_PATTERN.match(text.strip())
@@ -1444,6 +1567,53 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✅ Категория {em} *{cat_name}* добавлена!\nТеперь пиши: «{cat_name} 1500»",
                 parse_mode="Markdown"); return
+           if data == "installment_pay_menu":
+        if not installments: await query.edit_message_text("💳 Рассрочек нет."); return
+        kb = [[(f"💳 {v['name']} — {fmt(v['monthly'])} ₴", f"inst_pay_{k}")] for k, v in installments.items()]
+        kb.append([("← Назад", "inst_back")])
+        await query.edit_message_text("Выбери рассрочку для платежа:", reply_markup=inline_kb(kb)); return
+
+    if data.startswith("inst_pay_"):
+        iid = data[9:]
+        if iid not in installments: await query.edit_message_text("Рассрочка не найдена."); return
+        inst = installments[iid]
+        pay = inst["monthly"]
+        inst["paid"] = min(inst["paid"] + pay, inst["total"])
+        inst["payments_left"] = max(inst["payments_left"] - 1, 0)
+        update_installment_in_sheet(iid, inst["paid"], inst["payments_left"])
+        date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
+        save_expense(date, pay, "Рассрочка", f"Рассрочка {inst['name']}", f"платёж рассрочка {inst['name']}")
+        pct = min(int(inst["paid"] / inst["total"] * 100), 100) if inst["total"] > 0 else 0
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        msg = (f"✅ *Платёж {fmt(pay)} ₴* по «{inst['name']}» записан!\n\n"
+               f"[{bar}] {pct}%\n"
+               f"Выплачено: {fmt(inst['paid'])} / {fmt(inst['total'])} ₴\n"
+               f"Осталось платежей: {inst['payments_left']}")
+        if inst["paid"] >= inst["total"]:
+            update_installment_in_sheet(iid, inst["paid"], 0, "закрыта")
+            installments.pop(iid)
+            msg += "\n\n🎉 *Рассрочка выплачена!*"
+        await query.edit_message_text(msg, parse_mode="Markdown"); return
+
+    if data == "installment_close_menu":
+        if not installments: await query.edit_message_text("💳 Рассрочек нет."); return
+        kb = [[(f"🗑 {v['name']}", f"inst_close_{k}")] for k, v in installments.items()]
+        kb.append([("← Назад", "inst_back")])
+        await query.edit_message_text("Какую рассрочку закрыть?", reply_markup=inline_kb(kb)); return
+
+    if data.startswith("inst_close_"):
+        iid = data[11:]
+        if iid in installments:
+            inst = installments.pop(iid)
+            update_installment_in_sheet(iid, inst["paid"], 0, "закрыта")
+            await query.edit_message_text(f"🗑 Рассрочка *{inst['name']}* закрыта.", parse_mode="Markdown")
+        return
+
+    if data == "inst_back":
+        msg = build_installments_msg()
+        kb = inline_kb([[("💳 Внести платёж","installment_pay_menu"),("🗑 Закрыть рассрочку","installment_close_menu")]])
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=kb); return
+
 
     await process(update, context, text)
 
@@ -1466,7 +1636,26 @@ def _regex_route(text: str) -> list | None:
     if CURRENCY_AMOUNT_PATTERNS.search(t):
         logger.info(f"RegexRouter: пропуск (валюта) '{t[:50]}'")
         return None
-
+# Рассрочка: "Рассрочка Колёса 12000 на 12 месяцев 1000" или "Рассрочка Колёса 12000 12мес"
+    m = re.match(
+        r"рассрочк[аеу]?\s+(.+?)\s+(\d[\d\s.,]*(?:\s*к)?)\s+"
+        r"(?:на\s+)?(\d{1,3})\s*(?:мес\w*|платеж\w*|взнос\w*)\s*(\d[\d\s.,]*(?:\s*к)?)?",
+        t, re.IGNORECASE
+    )
+    if m:
+        try:
+            def _pnum(s):
+                s = s.strip().replace(" ","").replace(",",".")
+                mult = 1000 if s.lower().endswith("к") else 1
+                return float(re.sub(r"[кК]$","",s)) * mult
+            name = m.group(1).strip().capitalize()
+            total = _pnum(m.group(2))
+            months = int(m.group(3))
+            monthly = _pnum(m.group(4)) if m.group(4) else round(total / months, 2)
+            if total > 0 and months > 0:
+                return [{"action":"installment_new","name":name,"total":total,"monthly":monthly,"months":months}]
+        except: pass
+          
     # Зарплата
     m = re.search(
         r"зарплат[аы]?\s+(\d{1,2})[-\s]?(?:го|числа|ого)?\s+(\d[\d\s.,]*(?:\s*к)?)"
@@ -1562,6 +1751,8 @@ convert: {{"action":"convert","amount":N,"from_currency":"USD","to_currency":"UA
 category_add: {{"action":"category_add","name":"N","emoji":"E"}}
 expense_delete: {{"action":"expense_delete","description":null,"amount":null,"category":null}}
 expense_edit: {{"action":"expense_edit","old_category":"C","new_category":"C","amount":null,"description":""}}
+installment_new: {{"action":"installment_new","name":"N","total":N,"monthly":N,"months":N,"desc":""}}
+installment_pay: {{"action":"installment_pay","name":"N","amount":N}}
 question: {{"action":"question","text":"T"}}
 
 КАТЕГОРИИ: "Еда / продукты","Транспорт","Развлечения","Здоровье / аптека","Никотин","Другое"
@@ -1575,6 +1766,11 @@ question: {{"action":"question","text":"T"}}
 - "Имя вернул/повернув/отдал мне" → debt_return (Имя вернул мне долг)
 - "Имя отдал" (без "мне") → debt_return если Имя есть в списке долгов
 - НЕ путать: "я отдал Имя" ≠ debt_return, это я что-то заплатил
+
+ПРАВИЛА РАССРОЧКИ:
+- "рассрочка/в рассрочку Название СУММА на N месяцев ПЛАТЁЖ" → installment_new
+- "оплатил/заплатил рассрочку/платёж Название" → installment_pay
+- Платёж рассрочки = трата с категорией "Рассрочка"
 
 ДРУГИЕ ПРАВИЛА:
 - "3к"=3000 | рус/укр одинаково | спорт/йога→"Спорт"
@@ -1898,7 +2094,55 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         save_user_category(name, emoji_c)
         em = EMOJI_MAP.get(name, get_category_emoji(name))
         return f"✅ Категория {em} *{name}* добавлена!\nТеперь пиши: «{name} 1500»"
+ elif action == "installment_new":
+        name = route.get("name","Рассрочка").strip().capitalize()
+        total = float(str(route.get("total",0)).replace(",","."))
+        monthly = float(str(route.get("monthly",0)).replace(",","."))
+        months = int(route.get("months", round(total/monthly) if monthly else 1))
+        desc = route.get("desc","")
+        if total <= 0: return "🤔 Не понял сумму рассрочки."
+        if monthly <= 0: monthly = round(total / months, 2)
+        installment_counter[0] += 1
+        iid = str(installment_counter[0])
+        date_str = datetime.now(KYIV_TZ).strftime("%d.%m.%Y")
+        installments[iid] = {"name":name,"total":total,"monthly":monthly,"paid":0.0,"payments_left":months,"date":date_str,"desc":desc}
+        save_installment_to_sheet(iid, name, total, monthly, 0, months, date_str, desc)
+        pct = 0
+        bar = "░" * 10
+        return (f"💳 *Рассрочка: {name}*\n\n"
+                f"[{bar}] 0%\n"
+                f"Выплачено: 0 / {fmt(total)} ₴\n"
+                f"Ежемесячно: *{fmt(monthly)} ₴* × {months} платежей\n\n"
+                f"_Напиши «оплатил рассрочку {name}» когда внесёшь платёж_")
 
+    elif action == "installment_pay":
+        name_hint = route.get("name","").lower()
+        amount = float(str(route.get("amount",0)).replace(",","."))
+        iid = next((k for k,v in installments.items() if name_hint in v["name"].lower()), None)
+        if not iid and installments: iid = list(installments.keys())[-1]
+        if not iid: return "💳 Нет активных рассрочек."
+        inst = installments[iid]
+        pay_amount = amount if amount > 0 else inst["monthly"]
+        inst["paid"] = min(inst["paid"] + pay_amount, inst["total"])
+        inst["payments_left"] = max(inst["payments_left"] - 1, 0)
+        update_installment_in_sheet(iid, inst["paid"], inst["payments_left"])
+        pct = min(int(inst["paid"] / inst["total"] * 100), 100) if inst["total"] > 0 else 0
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        # Также записать как трату
+        date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
+        save_expense(date, pay_amount, "Рассрочка", f"Рассрочка {inst['name']}", text)
+        msg = (f"✅ *Платёж по рассрочке «{inst['name']}»*\n\n"
+               f"💳 *{fmt(pay_amount)} ₴* внесено\n"
+               f"[{bar}] {pct}%\n"
+               f"Выплачено: {fmt(inst['paid'])} / {fmt(inst['total'])} ₴\n"
+               f"Осталось платежей: {inst['payments_left']}")
+        if inst["paid"] >= inst["total"]:
+            update_installment_in_sheet(iid, inst["paid"], 0, "закрыта")
+            installments.pop(iid)
+            msg += "\n\n🎉 *Рассрочка полностью выплачена!*"
+        return msg
+
+  
     elif action == "expense_edit":
         old_cat = route.get("old_category","")
         new_cat = route.get("new_category","").strip().capitalize()
@@ -2109,6 +2353,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not _user_categories:
                 lines.append("\n_Добавь свою: «Добавь категорию Инвестиции»_")
             await send("\n".join(lines), parse_mode="Markdown")
+          elif action == "installments":
+            msg = build_installments_msg()
+            if installments:
+                kb = inline_kb([[("💳 Внести платёж","installment_pay_menu"),("🗑 Закрыть рассрочку","installment_close_menu")]])
+                await send(msg, parse_mode="Markdown", reply_markup=kb)
+            else:
+                await send(msg, parse_mode="Markdown")
         return
 
     if data == "goal_deposit":
