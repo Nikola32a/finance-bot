@@ -870,8 +870,8 @@ def load_recurring():
                 "category": r.get("Категория", "Другое"),
                 "emoji": r.get("Emoji", "🔄"),
             }
-                try: _recurring_counter[0] = max(_recurring_counter[0], int(r["ID"]))  # ← добавить
-                except: pass
+            try: _recurring_counter[0] = max(_recurring_counter[0], int(r["ID"]))
+            except: pass
     except Exception as e:
         logger.error(f"load_recurring: {e}")
 
