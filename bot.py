@@ -2363,7 +2363,7 @@ emoji_r = emoji_r or get_category_emoji(category)
 
 if category not in get_all_categories():
     save_user_category(category, emoji_r)
-     if not category or category.lower() == "другое":
+    if not category or category.lower() == "другое":
        category, auto_emoji = infer_category_from_name(name)
        if not emoji_r:
         emoji_r = auto_emoji
