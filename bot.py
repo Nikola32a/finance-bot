@@ -2370,13 +2370,13 @@ if category not in get_all_categories():
 
     category = fix_cat(category, keep_new=True)
     emoji_r = emoji_r or get_category_emoji(category)
-if amount <= 0: return "🤔 Не понял сумму. Пример: «Учёба каждый месяц 24го 3000»"
+    if amount <= 0: return "🤔 Не понял сумму. Пример: «Учёба каждый месяц 24го 3000»"
     if not 1 <= day <= 31: return "🤔 Не понял день месяца."
-        _recurring_counter[0] += 1
-        rid = str(_recurring_counter[0])
-        recurring[rid] = {"name":name,"amount":amount,"day":day,"category":category,"emoji":emoji_r}
-        save_recurring_to_sheet(rid, name, amount, day, category, emoji_r)
-        save_setting(
+    _recurring_counter[0] += 1
+    rid = str(_recurring_counter[0])
+    recurring[rid] = {"name":name,"amount":amount,"day":day,"category":category,"emoji":emoji_r}
+    save_recurring_to_sheet(rid, name, amount, day, category, emoji_r)
+    save_setting(
           f"last_recurring_{chat_id}",
           json.dumps({
            "id": rid,
