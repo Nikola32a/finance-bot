@@ -1011,7 +1011,7 @@ def parse_expenses(text: str) -> list:
 def get_financial_context(chat_id) -> str:
    now = datetime.now(KYIV_TZ)
     # Используем записи за зарплатный период (если есть зарплата) иначе за месяц
-    period_recs = get_period_records(chat_id)
+  period_recs = get_period_records(chat_id)
     month_recs = get_current_month_records()
     recs = period_recs if period_recs else month_recs
     s = analyze_records(recs)
