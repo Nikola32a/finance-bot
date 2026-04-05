@@ -232,12 +232,12 @@ def sum_records(records: list) -> float:
     return sum(float(r[k]) for r in records if r.get(k))
 
 def fix_cat(cat: str, desc: str = "", keep_new: bool = False) -> str:
-    """Валидирует категорию. keep_new=True — вернуть как есть если не найдена (для новых категорий от LLM)."""
+    """Нормализует категорию. keep_new=True — не сбрасывать в 'Другое' если категория новая от LLM."""
     cats = get_all_categories()
-    if not cat or cat.lower() == "другое":
-        return "Другое"
+    if not cat or cat.strip() == "": return "Другое"
     if cat in cats: return cat
     cat_low = cat.lower().strip()
+    if cat_low == "другое": return "Другое"
     for c in cats:
         if cat_low in c.lower() or c.lower() in cat_low:
             return c
@@ -246,7 +246,8 @@ def fix_cat(cat: str, desc: str = "", keep_new: bool = False) -> str:
     return "Другое"
 
 def validate_category(cat: str, desc: str = "") -> str:
-    return fix_cat(cat, desc)
+    # При сохранении используем keep_new=True — не ломаем новые категории
+    return fix_cat(cat, desc, keep_new=True)
 
 def save_expense(date, amount, category, description, raw_text):
     category = validate_category(category, description)
@@ -619,7 +620,7 @@ debt_counter = [0]
 def _debts_sheet():
     sh = _get_worksheet("Долги")
     if not sh.get_all_values():
-        sh.insert_row(["ID","Кому","Сумма","Дата","Статус","Примечание"], 1)
+        sh.insert_row(["ID","Кому","Сумма","Дата","Статус","Примечание","Процент"], 1)
     return sh
 
 def load_debts():
@@ -642,16 +643,19 @@ def load_debts():
                             if nums: amounts.append({"amount":float(nums[0].replace(",","")), "currency":cur})
                             break
                 if not amounts: amounts = [{"amount":0,"currency":"UAH"}]
-            debts[did] = {"name":r["Кому"],"amounts":amounts,"date":r["Дата"],"note":r.get("Примечание","")}
+            interest = 0.0
+            try: interest = float(r.get("Процент", 0) or 0)
+            except: pass
+            debts[did] = {"name":r["Кому"],"amounts":amounts,"date":r["Дата"],"note":r.get("Примечание",""),"interest":interest}
             try: debt_counter[0] = max(debt_counter[0], int(r["ID"]))
             except: pass
         logger.info(f"load_debts: загружено активных долгов: {len(debts)}")
     except Exception as e:
         logger.error(f"load_debts: {e}")
 
-def save_debt(did, name, amounts, date, note=""):
+def save_debt(did, name, amounts, date, note="", interest=0.0):
     amt_str = amounts_str(amounts)
-    try: _debts_sheet().append_row([did, name, amt_str, date, "активен", note])
+    try: _debts_sheet().append_row([did, name, amt_str, date, "активен", note, interest])
     except Exception as e: logger.error(f"save_debt: {e}")
 
 def mark_paid(did):
@@ -688,8 +692,18 @@ def build_debts_msg() -> str:
             days_ago = 0
         note = f" — _{d['note']}_" if d.get("note") else ""
         ams = d.get("amounts",[{"amount":d.get("amount",0),"currency":"UAH"}])
-        lines.append(f"👤 *{d['name']}* — {format_amounts(ams)}{note}")
-        lines.append(f"   📅 {d['date']} ({days_ago} дн. назад)")
+        interest = d.get("interest", 0)
+        interest_str = f" · 📈 {interest}%/мес" if interest else ""
+        # Считаем начисленные проценты
+        accrued_str = ""
+        if interest and days_ago > 0:
+            months_passed = days_ago / 30
+            for a in ams:
+                accrued = float(a["amount"]) * (interest / 100) * months_passed
+                sym = CURRENCY_SYMBOLS.get(a.get("currency","UAH"),"₴")
+                accrued_str += f"\n   📈 Начислено процентов: *{fmt(accrued)} {sym}*"
+        lines.append(f"👤 *{d['name']}* — {format_amounts(ams)}{note}{interest_str}")
+        lines.append(f"   📅 {d['date']} ({days_ago} дн. назад){accrued_str}")
         for a in ams: totals[a.get("currency","UAH")] += float(a["amount"])
     if totals:
         lines.append("")
@@ -706,7 +720,7 @@ installment_counter = [0]
 def _installments_sheet():
     sh = _get_worksheet("Рассрочка")
     if not sh.get_all_values():
-        sh.insert_row(["ID","Название","Общая сумма","Ежемесячный платёж","Выплачено","Осталось платежей","Дата начала","Статус","Описание"], 1)
+        sh.insert_row(["ID","Название","Общая сумма","Ежемесячный платёж","Выплачено","Осталось платежей","Дата начала","Статус"], 1)
     return sh
 
 def load_installments():
@@ -721,17 +735,14 @@ def load_installments():
                 "paid": float(r.get("Выплачено", 0)),
                 "payments_left": int(r.get("Осталось платежей", 0)),
                 "date": r["Дата начала"],
-                "desc": r.get("Описание", ""),
             }
             try: installment_counter[0] = max(installment_counter[0], int(r["ID"]))
             except: pass
     except Exception as e:
         logger.error(f"load_installments: {e}")
 
-def save_installment_to_sheet(iid, name, total, monthly, paid, payments_left, date, desc=""):
-    try:
-        left = total - paid
-        _installments_sheet().append_row([iid, name, total, monthly, paid, payments_left, date, "активна", desc])
+def save_installment_to_sheet(iid, name, total, monthly, paid, payments_left, date):
+    try: _installments_sheet().append_row([iid, name, total, monthly, paid, payments_left, date, "активна"])
     except Exception as e: logger.error(f"save_installment: {e}")
 
 def update_installment_in_sheet(iid, paid, payments_left, status="активна"):
@@ -746,23 +757,82 @@ def update_installment_in_sheet(iid, paid, payments_left, status="активна
     except Exception as e: logger.error(f"update_installment: {e}")
 
 def build_installments_msg() -> str:
-    if not installments: return "💳 Активных рассрочек нет.\n\nДобавь: «Рассрочка Колёса 12000 на 12 месяцев 1000»"
+    if not installments:
+        return "💳 Активных рассрочек нет.\n\nДобавь: «Рассрочка Колёса 12000 на 12 месяцев 1000»"
     lines = ["💳 *Мои рассрочки:*\n"]
     for iid, inst in installments.items():
-        paid = inst["paid"]
-        total = inst["total"]
-        monthly = inst["monthly"]
-        pl = inst["payments_left"]
+        paid, total, monthly, pl = inst["paid"], inst["total"], inst["monthly"], inst["payments_left"]
         pct = min(int(paid / total * 100), 100) if total > 0 else 0
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        left_sum = max(total - paid, 0)
         lines.append(f"💳 *{inst['name']}*")
         lines.append(f"   [{bar}] {pct}%")
         lines.append(f"   Выплачено: {fmt(paid)} / {fmt(total)} ₴")
-        lines.append(f"   Ежемесячно: *{fmt(monthly)} ₴* × {pl} платежей осталось")
-        if inst.get("desc"): lines.append(f"   _{inst['desc']}_")
+        lines.append(f"   Ежемесячно: *{fmt(monthly)} ₴* · осталось платежей: {pl}")
         lines.append("")
     return "\n".join(lines)
+
+# ── РЕГУЛЯРНЫЕ ПЛАТЕЖИ ────────────────────────────────────────────────────────
+recurring: dict = {}
+
+def _recurring_sheet():
+    sh = _get_worksheet("Регулярные")
+    if not sh.get_all_values():
+        sh.insert_row(["ID","Название","Сумма","День","Категория","Emoji","Статус"], 1)
+    return sh
+
+def load_recurring():
+    try:
+        for r in _recurring_sheet().get_all_records():
+            if r.get("Статус") != "активен": continue
+            rid = str(r["ID"])
+            recurring[rid] = {
+                "name": r["Название"],
+                "amount": float(r.get("Сумма", 0)),
+                "day": int(r.get("День", 1)),
+                "category": r.get("Категория", "Другое"),
+                "emoji": r.get("Emoji", "🔄"),
+            }
+    except Exception as e:
+        logger.error(f"load_recurring: {e}")
+
+def save_recurring_to_sheet(rid, name, amount, day, category, emoji):
+    try: _recurring_sheet().append_row([rid, name, amount, day, category, emoji, "активен"])
+    except Exception as e: logger.error(f"save_recurring: {e}")
+
+def delete_recurring_from_sheet(rid):
+    try:
+        sh = _recurring_sheet()
+        for i, r in enumerate(sh.get_all_records(), start=2):
+            if str(r.get("ID")) == str(rid):
+                sh.update_cell(i, 7, "удалён"); return
+    except Exception as e: logger.error(f"delete_recurring: {e}")
+
+_recurring_counter = [0]
+
+def build_recurring_msg() -> str:
+    if not recurring:
+        return "🔄 Регулярных платежей нет.\n\nДобавь: «Учёба каждый месяц 24го 3000»"
+    lines = ["🔄 *Регулярные платежи:*\n"]
+    for r in recurring.values():
+        lines.append(f"{r['emoji']} *{r['name']}* — {fmt(r['amount'])} ₴ каждое *{r['day']}-е* число")
+    return "\n".join(lines)
+
+async def fire_recurring_payments(context: ContextTypes.DEFAULT_TYPE):
+    """Проверяем регулярные платежи — запускается ежедневно."""
+    if not CHAT_ID: return
+    now = datetime.now(KYIV_TZ)
+    today = now.day
+    fired = []
+    for rid, r in recurring.items():
+        if r["day"] == today:
+            date_str = now.strftime("%d.%m.%Y %H:%M")
+            save_expense(date_str, r["amount"], r["category"], r["name"], f"авто: {r['name']}")
+            fired.append(r)
+    if fired:
+        lines = ["🔄 *Автоплатежи сегодня:*\n"]
+        for r in fired:
+            lines.append(f"{r['emoji']} *{r['name']}* — {fmt(r['amount'])} ₴")
+        await context.bot.send_message(chat_id=CHAT_ID, text="\n".join(lines), parse_mode="Markdown")
 
 # ── GROQ / LLM ───────────────────────────────────────────────────────────────
 def transcribe(path: str) -> str:
@@ -796,13 +866,14 @@ def _extract_json(raw: str, bracket="[") -> str:
 # ── ПАРСЕР ТРАТ ──────────────────────────────────────────────────────────────
 PARSE_SYSTEM = """Ты — парсер финансовых записей. Извлеки ВСЕ траты из сообщения.
 
-КАТЕГОРИИ:
-- "Еда / продукты" — еда, напитки, рестораны, кафе, доставка, магазины, алкоголь
+КАТЕГОРИИ (используй одну из них ИЛИ придумай новую):
+- "Еда / продукты" — еда, напитки, рестораны, кафе, доставка, магазины, пиво, алкоголь
 - "Транспорт" — бензин, заправки, такси, парковка, мойка, СТО, метро, автобус
-- "Развлечения" — игры, кино, стриминг, подписки, ставки, боулинг, концерты
+- "Развлечения" — игры, кино, стриминг, подписки, боулинг, концерты, бары
 - "Здоровье / аптека" — лекарства, аптека, врачи, массаж, парикмахер, маникюр, спортзал
 - "Никотин" — сигареты, снюс, вейп, кальян, ZYN, VELO
-- "Другое" — одежда, техника, коммунальные, интернет, телефон, подарки, ремонт
+- Если не подходит ни одна — придумай КОНКРЕТНУЮ категорию 1-2 слова (например: "Одежда", "Подарки", "Ремонт", "Техника", "Питомец", "Коммунальные", "Музыка", "Спорт")
+- ЗАПРЕЩЕНО использовать "Другое" — всегда придумывай конкретную категорию!
 
 ПРАВИЛА:
 1. Ищи ВСЕ суммы — "потратил", "заплатил", "купил", "вышло"
@@ -1185,7 +1256,7 @@ OTHER_KB = inline_kb([
     [("💡 Советы","menu_advice"),("💵 Зарплата","menu_salary")],
     [("🪞 Прошлое я","menu_past"),("💸 Привычки","menu_habits")],
     [("⏰ Напоминания","menu_reminder"),("🏷 Категории","menu_categories")],
-    [("💳 Рассрочки","menu_installments")],
+    [("💳 Рассрочки","menu_installments"),("🔄 Автоплатежи","menu_recurring")],
 ])
 REMINDER_KB = inline_kb([
     [("1 день","reminder_1"),("3 дня","reminder_3")],
@@ -1325,7 +1396,15 @@ async def cmd_rates(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_installments(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = build_installments_msg()
     if installments:
-        kb = inline_kb([[("💳 Внести платёж","installment_pay_menu"),("🗑 Закрыть рассрочку","installment_close_menu")]])
+        kb = inline_kb([[("💳 Внести платёж","inst_pay_menu"),("🗑 Закрыть","inst_close_menu")]])
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def cmd_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = build_recurring_msg()
+    if recurring:
+        kb = inline_kb([[("🗑 Удалить платёж","recur_del_menu")]])
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
     else:
         await update.message.reply_text(msg, parse_mode="Markdown")
@@ -1363,22 +1442,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚙️ *Прочее*:", parse_mode="Markdown", reply_markup=OTHER_KB); return
     if text == "🎯 Цели": await cmd_goals(update, context); return
 
-    # ── ПРИОРИТЕТ: частичное погашение долга ────────────────────────────────
+    # ── ПРИОРИТЕТ 1: частичное погашение долга ──────────────────────────────
     if "partial_debt_id" in context.user_data:
         did = context.user_data.get("partial_debt_id")
         idx = context.user_data.get("partial_amt_idx", 0)
         try:
-            amount = float(text.strip().replace(",", ".").replace(" ", ""))
+            amount = float(text.strip().replace(",",".").replace(" ",""))
             if amount > 0 and did in debts:
-                ex_ams = list(debts[did].get("amounts", []))
+                ex_ams = list(debts[did].get("amounts",[]))
                 if idx < len(ex_ams):
                     ea = ex_ams[idx]
-                    sym = CURRENCY_SYMBOLS.get(ea.get("currency", "UAH"), "₴")
+                    sym = CURRENCY_SYMBOLS.get(ea.get("currency","UAH"),"₴")
                     new_val = float(ea["amount"]) - amount
                     d = debts[did]
                     if new_val <= 0:
-                        ex_ams = [a for i, a in enumerate(ex_ams) if i != idx]
-                        msg = f"✅ *{d['name']}* вернул *{fmt(amount)} {sym}*\n💰 {sym}: долг закрыт"
+                        ex_ams = [a for i,a in enumerate(ex_ams) if i != idx]
+                        msg = f"✅ *{d['name']}* вернул *{fmt(amount)} {sym}*\n💰 Этот долг закрыт"
                     else:
                         ea["amount"] = new_val
                         msg = f"✅ *{d['name']}* вернул *{fmt(amount)} {sym}*\n📊 Остаток: *{fmt(new_val)} {sym}*"
@@ -1393,17 +1472,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(msg, parse_mode="Markdown")
                     return
         except (ValueError, TypeError):
-            pass  # не число — идём дальше, но не удаляем состояние
-        # Если ввели не число — напомнить
-        if not re.match(r"^\s*[\d.,\s]+\s*$", text):
-            del context.user_data["partial_debt_id"]
-            context.user_data.pop("partial_amt_idx", None)
+            pass
+        # Ввели не число — отмена
+        del context.user_data["partial_debt_id"]
+        context.user_data.pop("partial_amt_idx", None)
 
-    # ── ПРИОРИТЕТ: пополнение цели ──────────────────────────────────────────
+    # ── ПРИОРИТЕТ 2: пополнение цели ────────────────────────────────────────
     if "goal_deposit_id" in context.user_data:
         gid = context.user_data.get("goal_deposit_id")
         try:
-            amount = float(text.strip().replace(",", ".").replace(" ", ""))
+            amount = float(text.strip().replace(",",".").replace(" ",""))
             if amount > 0 and gid in goals:
                 g = goals[gid]
                 g["saved"] = min(g["saved"] + amount, g["target"])
@@ -1419,8 +1497,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         except (ValueError, TypeError):
             pass
-        if not re.match(r"^\s*[\d.,\s]+\s*$", text):
-            del context.user_data["goal_deposit_id"]
+        del context.user_data["goal_deposit_id"]
 
     # ── ПРОСТО ЧИСЛО: спрашиваем категорию ──────────────────────────────────
     # Срабатывает когда пользователь пишет только сумму без описания
@@ -1484,6 +1561,40 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _regex_route(text: str) -> list | None:
     t = text.strip()
 
+    # Рассрочка — оплата (до проверки не-трат чтобы не пропустить)
+    if re.search(r"оплатил|заплатил|внёс|вніс", t, re.IGNORECASE) and \
+       re.search(r"рассрочк|розстрочк|платіж|платеж", t, re.IGNORECASE):
+        # Ищем имя рассрочки
+        m = re.search(r"(?:рассрочк[уи]?|розстрочк[уи]?|платіж|платеж)\s+([А-ЯЁа-яёіїєa-zA-Z][^\d\n]{1,30}?)(?:\s+(\d[\d.,\s]*))?$", t, re.IGNORECASE)
+        name_hint = m.group(1).strip() if m else ""
+        amount_raw = m.group(2).strip() if (m and m.group(2)) else "0"
+        try: amount = float(amount_raw.replace(",",".").replace(" ",""))
+        except: amount = 0
+        return [{"action":"installment_pay","name":name_hint,"amount":amount}]
+
+    # Регулярный платёж — "учёба каждый месяц 24го 3000"
+    m = re.search(
+        r"(.+?)\s+каждый?\s+мес\w*\s+(\d{1,2})-?(?:го|числа)?\s+(\d[\d.,\s]*(?:к)?)"
+        r"|(.+?)\s+(\d{1,2})-?(?:го|числа)\s+каждый?\s+мес\w*\s+(\d[\d.,\s]*(?:к)?)",
+        t, re.IGNORECASE
+    )
+    if m:
+        try:
+            g = m.groups()
+            if g[0]:  # первый вариант
+                name, day_s, amt_s = g[0].strip(), g[1], g[2]
+            else:     # второй вариант
+                name, day_s, amt_s = g[3].strip(), g[4], g[5]
+            name = name.capitalize()
+            day = int(day_s)
+            amt_s = amt_s.strip().replace(" ","").replace(",",".")
+            mult = 1000 if amt_s.lower().endswith("к") else 1
+            amt_s = re.sub(r"[кК]$","",amt_s)
+            amount = float(amt_s) * mult
+            if 1 <= day <= 31 and amount > 0:
+                return [{"action":"recurring_new","name":name,"amount":amount,"day":day,"category":"Другое","emoji":"🔄"}]
+        except: pass
+
     # Не-траты → LLM
     if NON_EXPENSE_PATTERNS.search(t):
         logger.info(f"RegexRouter: пропуск (не-трата) '{t[:50]}'")
@@ -1498,26 +1609,6 @@ def _regex_route(text: str) -> list | None:
     if CURRENCY_AMOUNT_PATTERNS.search(t):
         logger.info(f"RegexRouter: пропуск (валюта) '{t[:50]}'")
         return None
-
-    # Рассрочка: "Рассрочка Колёса 12000 на 12 месяцев 1000" или "Рассрочка Колёса 12000 12мес"
-    m = re.match(
-        r"рассрочк[аеу]?\s+(.+?)\s+(\d[\d\s.,]*(?:\s*к)?)\s+"
-        r"(?:на\s+)?(\d{1,3})\s*(?:мес\w*|платеж\w*|взнос\w*)\s*(\d[\d\s.,]*(?:\s*к)?)?",
-        t, re.IGNORECASE
-    )
-    if m:
-        try:
-            def _pnum(s):
-                s = s.strip().replace(" ","").replace(",",".")
-                mult = 1000 if s.lower().endswith("к") else 1
-                return float(re.sub(r"[кК]$","",s)) * mult
-            name = m.group(1).strip().capitalize()
-            total = _pnum(m.group(2))
-            months = int(m.group(3))
-            monthly = _pnum(m.group(4)) if m.group(4) else round(total / months, 2)
-            if total > 0 and months > 0:
-                return [{"action":"installment_new","name":name,"total":total,"monthly":monthly,"months":months}]
-        except: pass
 
     # Зарплата
     m = re.search(
@@ -1606,7 +1697,7 @@ ROUTER_SYSTEM = """Финансовый бот. Верни ТОЛЬКО JSON {{"
 
 ДЕЙСТВИЯ:
 expense: {{"action":"expense","expenses":[{{"amount":N,"category":"C","description":"D","emoji":"E"}}]}}
-debt_new: {{"action":"debt_new","name":"N","amounts":[{{"amount":N,"currency":"UAH"}}],"note":""}}
+debt_new: {{"action":"debt_new","name":"N","amounts":[{{"amount":N,"currency":"UAH"}}],"note":"","interest":0}}
 debt_add: {{"action":"debt_add","name":"N","amount":N,"currency":"UAH"}}
 debt_return: {{"action":"debt_return","name":"N","amount":N,"currency":"UAH"}}
 debt_remind: {{"action":"debt_remind","name":"N","minutes":N}}
@@ -1618,33 +1709,37 @@ convert: {{"action":"convert","amount":N,"from_currency":"USD","to_currency":"UA
 category_add: {{"action":"category_add","name":"N","emoji":"E"}}
 expense_delete: {{"action":"expense_delete","description":null,"amount":null,"category":null}}
 expense_edit: {{"action":"expense_edit","old_category":"C","new_category":"C","amount":null,"description":""}}
-installment_new: {{"action":"installment_new","name":"N","total":N,"monthly":N,"months":N,"desc":""}}
-installment_pay: {{"action":"installment_pay","name":"N","amount":N}}
+installment_new: {{"action":"installment_new","name":"N","total":N,"monthly":N,"months":N}}
+installment_pay: {{"action":"installment_pay","name":"N","amount":0}}
+recurring_new: {{"action":"recurring_new","name":"N","amount":N,"day":N,"category":"C","emoji":"E"}}
 question: {{"action":"question","text":"T"}}
 
 КАТЕГОРИИ: "Еда / продукты","Транспорт","Развлечения","Здоровье / аптека","Никотин"
-ВАЖНО: НЕ используй "Другое"! Придумай подходящую новую категорию (1-2 слова рус).
+ЗАПРЕЩЕНО использовать "Другое"! Придумай конкретную категорию (Одежда, Подарки, Ремонт, Музыка и т.д.)
 Пользовательские: {user_cats}
 МНЕ ДОЛЖНЫ: {debts} | ЦЕЛИ: {goals} | КОНТЕКСТ: {context}
 
 ПРАВИЛА ДОЛГОВ (КРИТИЧНО!):
-- Долг = кто-то должен МНЕ деньги (я дал в долг, мне должны вернуть)
-- "дал/дав/позичив Имя сумму" → debt_new (Имя теперь должен МНЕ)
-- "Имя борг/долг сумма" → debt_new (Имя должен МНЕ)
-- "Имя вернул/повернув/отдал мне" → debt_return (Имя вернул мне долг)
-- "Имя отдал" (без "мне") → debt_return если Имя есть в списке долгов
-- НЕ путать: "я отдал Имя" ≠ debt_return, это я что-то заплатил
+- "дал/дав/позичив Имя сумму" → debt_new
+- "дал в долг Имя сумму под X%" → debt_new с interest=X
+- "Имя борг/долг сумма" → debt_new
+- "Имя вернул/повернув/отдал мне" → debt_return
+- НЕ путать: "я отдал Имя" ≠ debt_return
 
 ПРАВИЛА РАССРОЧКИ:
-- "рассрочка/в рассрочку Название СУММА на N месяцев ПЛАТЁЖ" → installment_new
-- "оплатил/заплатил рассрочку/платёж Название" → installment_pay
-- Платёж рассрочки = трата с категорией "Рассрочка"
+- "рассрочка/в рассрочку Название СУММА на N мес ПЛАТЁЖ" → installment_new
+- "оплатил рассрочку/платёж Название" → installment_pay
+- "оплатил рассрочку колёс/колёса/колёсо" — name="Колёса" (ищи ближайшее совпадение)
+
+ПРАВИЛА РЕГУЛЯРНЫХ ПЛАТЕЖЕЙ:
+- "учёба/курс/абонемент каждый месяц Nго СУММА" → recurring_new
+- "добавь регулярный платёж Название СУММА Nго числа" → recurring_new
 
 ДРУГИЕ ПРАВИЛА:
-- "3к"=3000 | рус/укр одинаково | спорт/йога→"Спорт"
+- "3к"=3000 | рус/укр одинаково
 - несколько команд→все в массиве
 - "закинул/пополнил счет/карту" → question (не трата)
-- суммы с USD/EUR/долларах → currency="USD"/"EUR", НИКОГДА не UAH если написано валюта
+- суммы с USD/EUR → currency="USD"/"EUR"
 {{"actions": [...]}}"""
 
 async def route_message(text: str, chat_id, conv_ctx: dict) -> list:
@@ -1714,8 +1809,8 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         for exp in expenses:
             amount = float(str(exp.get("amount",0)).replace(",","."))
             if amount <= 0: continue
-            raw_cat = (exp.get("category","") or "").strip()
-            # Используем keep_new=True чтобы не потерять категорию от LLM
+            raw_cat = (exp.get("category") or "").strip()
+            # Определяем итоговую категорию — keep_new=True сохраняет то что придумала LLM
             cat = fix_cat(raw_cat, keep_new=True) if raw_cat else "Другое"
             is_new = cat not in get_all_categories() and cat != "Другое"
             desc = exp.get("description","—")
@@ -1727,7 +1822,7 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         if len(expenses) > 1:
             total = sum(float(str(e.get("amount",0)).replace(",",".")) for e in expenses)
             lines.append(f"\n💰 *Итого: {fmt(total)} ₴*")
-        cat0 = fix_cat(expenses[0].get("category","Другое"), keep_new=True)
+        cat0 = fix_cat((expenses[0].get("category") or "Другое"), keep_new=True)
         sk = get_sum_key(month_recs)
         cat_total = sum(float(r[sk]) for r in month_recs if fix_cat(r.get("Категория",""))==cat0 and r.get(sk))
         if cat_total > 0:
@@ -1738,19 +1833,19 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
             if pct >= 90: lines.append(f"\n🔴 *Бюджет на {pct}%!*")
             elif pct >= 70: lines.append(f"\n🟡 Бюджет на {pct}%")
         set_ctx(chat_id, last_action="expense")
-        # Предлагаем сохранить новую категорию
+        # Предлагаем сохранить новые категории
         if new_cats_to_suggest and update is not None:
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
             for new_cat, new_emoji in new_cats_to_suggest:
                 em = new_emoji or get_category_emoji(new_cat)
                 kb = inline_kb([
-                    [(f"✅ Да, добавить «{new_cat}»", f"savecat_{new_cat}")],
-                    [("❌ Нет, не нужно", "savecat_skip")],
+                    [(f"✅ Добавить «{new_cat}»", f"savecat_{new_cat}")],
+                    [("Нет, не нужно", "savecat_skip")],
                 ])
-                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
                 await update.message.reply_text(
-                    f"💡 Вижу новую категорию {em} *{new_cat}*.\nДобавить её в список категорий?",
+                    f"💡 Новая категория {em} *{new_cat}* — добавить в список?",
                     parse_mode="Markdown", reply_markup=kb)
-                return None
+            return None
         return "\n".join(lines)
 
     elif action == "expense_delete":
@@ -1786,6 +1881,12 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
             for a in ams:
                 if a.get("currency","UAH") == "UAH":
                     a["currency"] = detected_cur
+        interest = float(route.get("interest", 0) or 0)
+        # Проверяем процент из текста если LLM не распознал
+        if not interest:
+            m_interest = re.search(r"под\s+(\d+(?:[.,]\d+)?)\s*%", text, re.IGNORECASE)
+            if m_interest:
+                interest = float(m_interest.group(1).replace(",","."))
         existing = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None)
         if existing:
             ex_ams = debts[existing].get("amounts",[])
@@ -1795,6 +1896,7 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
                 if found: found["amount"] = float(found["amount"]) + float(na["amount"])
                 else: ex_ams.append(na)
             debts[existing]["amounts"] = ex_ams
+            if interest: debts[existing]["interest"] = interest
             update_debt_amounts(existing, ex_ams)
             set_ctx(chat_id, last_name=name, last_action="debt_add")
             return f"➕ *{name}* — долг обновлён\n💰 Итого: {format_amounts(ex_ams)}"
@@ -1802,13 +1904,14 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         debt_counter[0] += 1
         did = str(debt_counter[0])
         date_str = datetime.now(KYIV_TZ).strftime("%d.%m.%Y")
-        debts[did] = {"name":name,"amounts":ams,"date":date_str,"note":note}
-        save_debt(did, name, ams, date_str, note)
+        debts[did] = {"name":name,"amounts":ams,"date":date_str,"note":note,"interest":interest}
+        save_debt(did, name, ams, date_str, note, interest)
         context.job_queue.run_once(send_debt_reminder, when=get_reminder_interval(chat_id),
             data={"debt_id":did,"chat_id":chat_id}, name=f"debt_{did}")
         set_ctx(chat_id, last_name=name, last_action="debt_new")
         note_str = f"\n📝 {note}" if note else ""
-        return (f"💸 *Записал долг!*\n\n👤 *{name}* должен тебе:\n💰 {format_amounts(ams)}{note_str}\n\n"
+        interest_str = f"\n📈 Процент: *{interest}% в месяц*" if interest else ""
+        return (f"💸 *Записал долг!*\n\n👤 *{name}* должен тебе:\n💰 {format_amounts(ams)}{note_str}{interest_str}\n\n"
                 f"_«ещё 500» — добавит к долгу_\n⏰ Напомню через {reminder_label(chat_id)}.")
 
     elif action == "debt_add":
@@ -1982,54 +2085,6 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         em = EMOJI_MAP.get(name, get_category_emoji(name))
         return f"✅ Категория {em} *{name}* добавлена!\nТеперь пиши: «{name} 1500»"
 
-    elif action == "installment_new":
-        name = route.get("name","Рассрочка").strip().capitalize()
-        total = float(str(route.get("total",0)).replace(",","."))
-        monthly = float(str(route.get("monthly",0)).replace(",","."))
-        months = int(route.get("months", round(total/monthly) if monthly else 1))
-        desc = route.get("desc","")
-        if total <= 0: return "🤔 Не понял сумму рассрочки."
-        if monthly <= 0: monthly = round(total / months, 2)
-        installment_counter[0] += 1
-        iid = str(installment_counter[0])
-        date_str = datetime.now(KYIV_TZ).strftime("%d.%m.%Y")
-        installments[iid] = {"name":name,"total":total,"monthly":monthly,"paid":0.0,"payments_left":months,"date":date_str,"desc":desc}
-        save_installment_to_sheet(iid, name, total, monthly, 0, months, date_str, desc)
-        pct = 0
-        bar = "░" * 10
-        return (f"💳 *Рассрочка: {name}*\n\n"
-                f"[{bar}] 0%\n"
-                f"Выплачено: 0 / {fmt(total)} ₴\n"
-                f"Ежемесячно: *{fmt(monthly)} ₴* × {months} платежей\n\n"
-                f"_Напиши «оплатил рассрочку {name}» когда внесёшь платёж_")
-
-    elif action == "installment_pay":
-        name_hint = route.get("name","").lower()
-        amount = float(str(route.get("amount",0)).replace(",","."))
-        iid = next((k for k,v in installments.items() if name_hint in v["name"].lower()), None)
-        if not iid and installments: iid = list(installments.keys())[-1]
-        if not iid: return "💳 Нет активных рассрочек."
-        inst = installments[iid]
-        pay_amount = amount if amount > 0 else inst["monthly"]
-        inst["paid"] = min(inst["paid"] + pay_amount, inst["total"])
-        inst["payments_left"] = max(inst["payments_left"] - 1, 0)
-        update_installment_in_sheet(iid, inst["paid"], inst["payments_left"])
-        pct = min(int(inst["paid"] / inst["total"] * 100), 100) if inst["total"] > 0 else 0
-        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        # Также записать как трату
-        date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
-        save_expense(date, pay_amount, "Рассрочка", f"Рассрочка {inst['name']}", text)
-        msg = (f"✅ *Платёж по рассрочке «{inst['name']}»*\n\n"
-               f"💳 *{fmt(pay_amount)} ₴* внесено\n"
-               f"[{bar}] {pct}%\n"
-               f"Выплачено: {fmt(inst['paid'])} / {fmt(inst['total'])} ₴\n"
-               f"Осталось платежей: {inst['payments_left']}")
-        if inst["paid"] >= inst["total"]:
-            update_installment_in_sheet(iid, inst["paid"], 0, "закрыта")
-            installments.pop(iid)
-            msg += "\n\n🎉 *Рассрочка полностью выплачена!*"
-        return msg
-
     elif action == "expense_edit":
         old_cat = route.get("old_category","")
         new_cat = route.get("new_category","").strip().capitalize()
@@ -2073,6 +2128,82 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         else: label = f"{int(minutes//1440)} дней"
         set_ctx(chat_id, last_name=d["name"], last_action="debt_remind")
         return f"⏰ Напомню о долге *{d['name']}* через *{label}*."
+
+    elif action == "installment_new":
+        name = str(route.get("name","Рассрочка")).strip().capitalize()
+        total = float(str(route.get("total",0)).replace(",","."))
+        monthly = float(str(route.get("monthly",0)).replace(",","."))
+        months = int(route.get("months", 1))
+        if total <= 0: return "🤔 Не понял сумму рассрочки. Пример: «Рассрочка Колёса 12000 на 12 месяцев 1000»"
+        if monthly <= 0 and months > 0: monthly = round(total / months, 2)
+        if months <= 0 and monthly > 0: months = round(total / monthly)
+        installment_counter[0] += 1
+        iid = str(installment_counter[0])
+        date_str = datetime.now(KYIV_TZ).strftime("%d.%m.%Y")
+        installments[iid] = {"name":name,"total":total,"monthly":monthly,"paid":0.0,"payments_left":months,"date":date_str}
+        save_installment_to_sheet(iid, name, total, monthly, 0, months, date_str)
+        bar = "░" * 10
+        return (f"💳 *Рассрочка: {name}*\n\n[{bar}] 0%\n"
+                f"Выплачено: 0 / {fmt(total)} ₴\n"
+                f"Ежемесячно: *{fmt(monthly)} ₴* × {months} платежей\n\n"
+                f"_Напиши «оплатил рассрочку {name}» когда внесёшь платёж_")
+
+    elif action == "installment_pay":
+        name_hint = str(route.get("name","")).lower().strip()
+        amount = float(str(route.get("amount",0)).replace(",","."))
+        # Нечёткий поиск по имени рассрочки
+        iid = None
+        if name_hint:
+            # Пробуем точное совпадение, потом частичное
+            for k, v in installments.items():
+                if name_hint in v["name"].lower() or v["name"].lower() in name_hint:
+                    iid = k; break
+            # Если не нашли — пробуем посимвольно (колёс → Колёса)
+            if not iid:
+                for k, v in installments.items():
+                    inst_words = v["name"].lower().split()
+                    hint_words = name_hint.split()
+                    if any(hw[:4] in iw or iw[:4] in hw for hw in hint_words for iw in inst_words):
+                        iid = k; break
+        if not iid and installments:
+            iid = list(installments.keys())[-1]  # последняя рассрочка как fallback
+        if not iid: return "💳 Нет активных рассрочек. Добавь: «Рассрочка Колёса 12000 на 12 месяцев 1000»"
+        inst = installments[iid]
+        pay = amount if amount > 0 else inst["monthly"]
+        inst["paid"] = min(inst["paid"] + pay, inst["total"])
+        inst["payments_left"] = max(inst["payments_left"] - 1, 0)
+        update_installment_in_sheet(iid, inst["paid"], inst["payments_left"])
+        date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
+        save_expense(date, pay, "Рассрочка", f"Рассрочка {inst['name']}", text)
+        pct = min(int(inst["paid"] / inst["total"] * 100), 100) if inst["total"] > 0 else 0
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        msg = (f"✅ *Платёж по рассрочке «{inst['name']}»*\n\n"
+               f"💳 {fmt(pay)} ₴ внесено\n[{bar}] {pct}%\n"
+               f"Выплачено: {fmt(inst['paid'])} / {fmt(inst['total'])} ₴\n"
+               f"Осталось платежей: {inst['payments_left']}")
+        if inst["paid"] >= inst["total"]:
+            update_installment_in_sheet(iid, inst["paid"], 0, "закрыта")
+            installments.pop(iid)
+            msg += "\n\n🎉 *Рассрочка полностью выплачена!*"
+        return msg
+
+    elif action == "recurring_new":
+        name = str(route.get("name","Платёж")).strip().capitalize()
+        amount = float(str(route.get("amount",0)).replace(",","."))
+        day = int(route.get("day", 1))
+        category = str(route.get("category","Другое")).strip() or "Другое"
+        emoji_r = str(route.get("emoji","🔄")).strip() or "🔄"
+        if amount <= 0: return "🤔 Не понял сумму. Пример: «Учёба каждый месяц 24го 3000»"
+        if not 1 <= day <= 31: return "🤔 Не понял день месяца."
+        _recurring_counter[0] += 1
+        rid = str(_recurring_counter[0])
+        recurring[rid] = {"name":name,"amount":amount,"day":day,"category":category,"emoji":emoji_r}
+        save_recurring_to_sheet(rid, name, amount, day, category, emoji_r)
+        return (f"🔄 *Регулярный платёж добавлен!*\n\n"
+                f"{emoji_r} *{name}* — {fmt(amount)} ₴\n"
+                f"📅 Каждое *{day}-е* число\n"
+                f"_{category}_\n\n"
+                f"_Буду автоматически записывать трату каждый месяц {day}-го числа_")
 
     elif action == "question":
         q = route.get("text", text)
@@ -2129,7 +2260,7 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
                 for exp in expenses:
                     amount = float(str(exp.get("amount",0)))
                     if amount <= 0: continue
-                    raw_cat = (exp.get("category","") or "").strip()
+                    raw_cat = (exp.get("category") or "").strip()
                     cat = fix_cat(raw_cat, keep_new=True) if raw_cat else "Другое"
                     is_new = cat not in get_all_categories() and cat != "Другое"
                     desc = exp.get("description","—")
@@ -2139,15 +2270,14 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
                     if is_new and cat not in [c for c,_ in new_cats_fallback]:
                         new_cats_fallback.append((cat, emoji or get_category_emoji(cat)))
                 responses.append("\n".join(lines))
-                # Предлагаем сохранить новые категории
                 for new_cat, new_emoji in new_cats_fallback:
                     em = new_emoji or get_category_emoji(new_cat)
                     kb = inline_kb([
-                        [(f"✅ Да, добавить «{new_cat}»", f"savecat_{new_cat}")],
-                        [("❌ Нет, не нужно", "savecat_skip")],
+                        [(f"✅ Добавить «{new_cat}»", f"savecat_{new_cat}")],
+                        [("Нет, не нужно", "savecat_skip")],
                     ])
                     await update.message.reply_text(
-                        f"💡 Вижу новую категорию {em} *{new_cat}*.\nДобавить её в список?",
+                        f"💡 Новая категория {em} *{new_cat}* — добавить в список?",
                         parse_mode="Markdown", reply_markup=kb)
             else:
                 responses.append(
@@ -2258,7 +2388,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "installments":
             msg = build_installments_msg()
             if installments:
-                kb = inline_kb([[("💳 Внести платёж","installment_pay_menu"),("🗑 Закрыть рассрочку","installment_close_menu")]])
+                kb = inline_kb([[("💳 Внести платёж","inst_pay_menu"),("🗑 Закрыть","inst_close_menu")]])
+                await send(msg, parse_mode="Markdown", reply_markup=kb)
+            else:
+                await send(msg, parse_mode="Markdown")
+        elif action == "recurring":
+            msg = build_recurring_msg()
+            if recurring:
+                kb = inline_kb([[("🗑 Удалить платёж","recur_del_menu")]])
                 await send(msg, parse_mode="Markdown", reply_markup=kb)
             else:
                 await send(msg, parse_mode="Markdown")
@@ -2425,8 +2562,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 data={"debt_id":did,"chat_id":chat_id}, name=f"debt_{did}")
             await query.edit_message_text(f"⏰ Напомню о *{d['name']}* через {reminder_label(chat_id)}.", parse_mode="Markdown"); return
 
+    # ── savecat: сохранить новую категорию ──────────────────────────────────
     if data == "savecat_skip":
-        await query.edit_message_text("👍 Окей, категория не сохранена."); return
+        await query.edit_message_text("👍 Ок, не добавляю."); return
 
     if data.startswith("savecat_"):
         cat_name = data[8:].strip()
@@ -2434,16 +2572,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_user_category(cat_name)
             em = get_category_emoji(cat_name)
             await query.edit_message_text(
-                f"✅ Категория {em} *{cat_name}* добавлена!\nТеперь пиши, например: «{cat_name} 500»",
+                f"✅ Категория {em} *{cat_name}* добавлена!\nПиши: «{cat_name} 500»",
                 parse_mode="Markdown")
         else:
-            await query.edit_message_text(f"ℹ️ Категория *{cat_name}* уже есть в списке.", parse_mode="Markdown")
+            await query.edit_message_text(
+                f"ℹ️ Категория *{cat_name}* уже есть.", parse_mode="Markdown")
         return
 
-    if data == "installment_pay_menu":
+    # ── Рассрочки ────────────────────────────────────────────────────────────
+    if data == "inst_pay_menu":
         if not installments: await query.edit_message_text("💳 Рассрочек нет."); return
-        kb = [[(f"💳 {v['name']} — {fmt(v['monthly'])} ₴", f"inst_pay_{k}")] for k, v in installments.items()]
-        kb.append([("← Назад", "inst_back")])
+        kb = [[(f"💳 {v['name']} ({fmt(v['monthly'])} ₴)", f"inst_pay_{k}")] for k,v in installments.items()]
+        kb.append([("← Назад","inst_back")])
         await query.edit_message_text("Выбери рассрочку для платежа:", reply_markup=inline_kb(kb)); return
 
     if data.startswith("inst_pay_"):
@@ -2459,8 +2599,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pct = min(int(inst["paid"] / inst["total"] * 100), 100) if inst["total"] > 0 else 0
         bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
         msg = (f"✅ *Платёж {fmt(pay)} ₴* по «{inst['name']}» записан!\n\n"
-               f"[{bar}] {pct}%\n"
-               f"Выплачено: {fmt(inst['paid'])} / {fmt(inst['total'])} ₴\n"
+               f"[{bar}] {pct}%\nВыплачено: {fmt(inst['paid'])} / {fmt(inst['total'])} ₴\n"
                f"Осталось платежей: {inst['payments_left']}")
         if inst["paid"] >= inst["total"]:
             update_installment_in_sheet(iid, inst["paid"], 0, "закрыта")
@@ -2468,10 +2607,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += "\n\n🎉 *Рассрочка выплачена!*"
         await query.edit_message_text(msg, parse_mode="Markdown"); return
 
-    if data == "installment_close_menu":
+    if data == "inst_close_menu":
         if not installments: await query.edit_message_text("💳 Рассрочек нет."); return
-        kb = [[(f"🗑 {v['name']}", f"inst_close_{k}")] for k, v in installments.items()]
-        kb.append([("← Назад", "inst_back")])
+        kb = [[(f"🗑 {v['name']}", f"inst_close_{k}")] for k,v in installments.items()]
+        kb.append([("← Назад","inst_back")])
         await query.edit_message_text("Какую рассрочку закрыть?", reply_markup=inline_kb(kb)); return
 
     if data.startswith("inst_close_"):
@@ -2484,9 +2623,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "inst_back":
         msg = build_installments_msg()
-        kb = inline_kb([[("💳 Внести платёж","installment_pay_menu"),("🗑 Закрыть рассрочку","installment_close_menu")]])
+        kb = inline_kb([[("💳 Внести платёж","inst_pay_menu"),("🗑 Закрыть","inst_close_menu")]])
         await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=kb); return
 
+    # ── Регулярные платежи ───────────────────────────────────────────────────
+    if data == "recur_del_menu":
+        if not recurring: await query.edit_message_text("🔄 Регулярных платежей нет."); return
+        kb = [[(f"🗑 {v['name']} ({fmt(v['amount'])} ₴, {v['day']}-е)", f"recur_del_{k}")] for k,v in recurring.items()]
+        await query.edit_message_text("Какой платёж удалить?", reply_markup=inline_kb(kb)); return
+
+    if data.startswith("recur_del_"):
+        rid = data[10:]
+        if rid in recurring:
+            r = recurring.pop(rid)
+            delete_recurring_from_sheet(rid)
+            await query.edit_message_text(f"🗑 Платёж *{r['name']}* удалён.", parse_mode="Markdown")
+        return
+
+    # ── menu_installments / menu_recurring ────────────────────────────────────
     if data == "back":
         await query.edit_message_text("Выбери раздел:", reply_markup=inline_kb([
             [("💰 Финансы","menu_stats"),("📊 Аналитика","menu_week")],
@@ -2502,7 +2656,7 @@ def main():
         ("start",cmd_start),("stats",cmd_stats),("week",cmd_week),
         ("month",cmd_month),("budget",cmd_budget),("salary",cmd_salary),
         ("debts",cmd_debts),("reminder",cmd_reminder),("goals",cmd_goals),
-        ("rates",cmd_rates),("installments",cmd_installments),
+        ("rates",cmd_rates),("installments",cmd_installments),("recurring",cmd_recurring),
     ]:
         app.add_handler(CommandHandler(cmd, handler))
 
@@ -2515,11 +2669,13 @@ def main():
     load_user_categories(); time.sleep(1)
     load_debts(); time.sleep(1)
     load_goals(); time.sleep(1)
-    load_installments()
+    load_installments(); time.sleep(1)
+    load_recurring()
 
     if CHAT_ID and app.job_queue:
         app.job_queue.run_daily(send_weekly_insight, time=dtime(19,0), days=(4,), data={"chat_id":CHAT_ID})
         app.job_queue.run_daily(send_morning_briefing, time=dtime(9,0), data={"chat_id":CHAT_ID})
+        app.job_queue.run_daily(fire_recurring_payments, time=dtime(9,5), data={"chat_id":CHAT_ID})
 
     logger.info("AI-агент запущен! v5.8 🤖")
     app.run_polling()
