@@ -1441,7 +1441,7 @@ async def cmd_stats_inline(chat_id, context):
     bs = get_budget_status(chat_id)
     if bs:
         bar = "█"*(bs["percent"]//10) + "░"*(10-bs["percent"]//10)
-       lines += [f"\n{'🟢' if bs['percent']<70 else '🟡' if bs['percent']<90 else '🔴'} Бюджет: [{bar}] {bs['percent']}%",
+        lines += [f"\n{'🟢' if bs['percent']<70 else '🟡' if bs['percent']<90 else '🔴'} Бюджет: [{bar}] {bs['percent']}%",
                   f"Потрачено: *{fmt(bs['spent'])} ₴* / {fmt(bs['budget'])} ₴",
                   f"Осталось: *{fmt(bs['left'])} ₴*"]
     lines += _leak_lines(s)
