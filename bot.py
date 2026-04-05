@@ -1329,7 +1329,7 @@ async def send_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
 
     # Бюджет (с прогресс-баром)
     if bs:
-       pct = bs["percent"]
+        pct = bs["percent"]
         filled = pct // 10
         bar = "█" * filled + "░" * (10 - filled)
         status_icon = "🟢" if pct < 70 else "🟡" if pct < 90 else "🔴"
