@@ -858,6 +858,7 @@ def _recurring_sheet():
         sh.insert_row(["ID","Название","Сумма","День","Категория","Emoji","Статус"], 1)
     return sh
 _recurring_counter = [0]
+  
 def load_recurring():
     try:
         for r in _recurring_sheet().get_all_records():
