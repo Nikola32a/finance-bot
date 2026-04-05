@@ -2387,7 +2387,7 @@ if category not in get_all_categories():
            "emoji": emoji_r
           }, ensure_ascii=False)
 )
-        return (f"🔄 *Регулярный платёж добавлен!*\n\n"
+    return (f"🔄 *Регулярный платёж добавлен!*\n\n"
                 f"{emoji_r} *{name}* — {fmt(amount)} ₴\n"
                 f"📅 Каждое *{day}-е* число\n"
                 f"_{category}_\n\n"
