@@ -2823,9 +2823,9 @@ def main():
     load_recurring()
 
     if CHAT_ID and app.job_queue:
-        app.job_queue.run_daily(send_weekly_insight, time=dtime(19,0), days=(4,), data={"chat_id":CHAT_ID})
-        app.job_queue.run_daily(send_morning_briefing, time=dtime(9,0), data={"chat_id":CHAT_ID})
-        app.job_queue.run_daily(fire_recurring_payments, time=dtime(9,5), data={"chat_id":CHAT_ID})
+        app.job_queue.run_daily(send_weekly_insight,    time=dtime(19, 0, tzinfo=KYIV_TZ), days=(4,), data={"chat_id": CHAT_ID})
+        app.job_queue.run_daily(send_morning_briefing,  time=dtime(9,  0, tzinfo=KYIV_TZ), data={"chat_id": CHAT_ID})
+        app.job_queue.run_daily(fire_recurring_payments,time=dtime(9,  5, tzinfo=KYIV_TZ), data={"chat_id": CHAT_ID})
 
     logger.info("AI-агент запущен! v5.8 🤖")
     app.run_polling()
