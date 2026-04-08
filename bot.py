@@ -806,6 +806,18 @@ def update_debt_amounts(did, new_amounts):
                 sh.update_cell(i, 3, amounts_str(new_amounts)); return
     except Exception as e: logger.error(f"update_debt_amounts: {e}")
 
+def update_debt_interest(did, interest: float):
+    """Сохраняет процентную ставку долга в Google Sheets (колонка 7 = Процент)."""
+    try:
+        sh = _debts_sheet()
+        for i, r in enumerate(sh.get_all_records(), start=2):
+            if str(r.get("ID")) == str(did):
+                sh.update_cell(i, 7, interest)
+                logger.info(f"update_debt_interest: долг {did} → {interest}%/мес")
+                return
+    except Exception as e:
+        logger.error(f"update_debt_interest: {e}")
+
 def amounts_str(amounts: list) -> str:
     return " + ".join(f"{a['amount']} {CURRENCY_SYMBOLS.get(a.get('currency','UAH'),'₴')}" for a in amounts)
 
@@ -924,9 +936,12 @@ def load_recurring():
                 "name": r["Название"],
                 "amount": float(r.get("Сумма", 0)),
                 "day": int(r.get("День", 1)),
-                "category": r.get("Категория", "Другое"),
+                "category": r.get("Категория", "Регулярный платёж") or "Регулярный платёж",
                 "emoji": r.get("Emoji", "🔄"),
             }
+            try: _recurring_counter[0] = max(_recurring_counter[0], int(r["ID"]))
+            except: pass
+        logger.info(f"load_recurring: загружено {len(recurring)} платежей")
     except Exception as e:
         logger.error(f"load_recurring: {e}")
 
@@ -1228,24 +1243,53 @@ async def build_past_self_ai(chat_id) -> str:
 ДАННЫЕ:
 {chr(10).join(data_lines)}
 
-Напиши анализ:
-- Заголовок 🪞 *Сравнение с прошлым «я»*
-- 2-3 конкретных наблюдения с цифрами
-- 1 короткий вывод или совет
-- Тон: дружелюбный, без воды, с эмодзи
-- Длина: 5-8 строк"""
-    messages = [{"role":"system","content":"Отвечай только на русском. Markdown через *. Без лишних слов."},
+ФОРМАТ ОТВЕТА — строго такой (Markdown, Telegram):
+
+🪞 *Сравнение с прошлым «я»*
+
+📅 *[Текущий месяц]* — [сумма] ₴
+├ [Emoji категория 1]: [сумма] ₴ ([%])
+├ [Emoji категория 2]: [сумма] ₴ ([%])
+└ [Emoji категория 3]: [сумма] ₴ ([%])
+
+📅 *[Прошлый месяц]* — [сумма] ₴  [📈/📉 +/-X%]
+├ [Emoji категория 1]: [сумма] ₴
+└ [Emoji категория 2]: [сумма] ₴
+
+💡 *Вывод:* [1 конкретный практичный совет с цифрой]
+
+ПРАВИЛА:
+- Только цифры из данных, никаких выдумок
+- Эмодзи категорий: 🍔еда 🚗транспорт 🎮развлечения 💊здоровье 🚬никотин 👕одежда 🏠коммун 💪спорт 📚учёба
+- % считай от суммы месяца
+- Совет — конкретный (не «трать меньше», а «сократи транспорт с X до Y — сэкономишь Z ₴/мес»)
+- Без вводных слов, без «конечно», без лишнего текста"""
+    messages = [{"role":"system","content":"Отвечай только на русском. Используй Markdown (жирный через *). Строго следуй формату."},
                 {"role":"user","content":prompt}]
     try:
-        return groq_chat(messages, max_tokens=400)
+        return groq_chat(messages, max_tokens=500)
     except:
+        # Fallback — красивые карточки без LLM
         lines = ["🪞 *Сравнение с прошлым «я»*\n"]
+        cur_cats = sorted(cur["by_category"].items(), key=lambda x:-x[1])[:3]
+        lines.append(f"📅 *{month_name(now.month)}* — *{fmt(cur['total'])} ₴*")
+        for i, (cat, amt) in enumerate(cur_cats):
+            pct = int(amt / cur['total'] * 100) if cur['total'] else 0
+            prefix = "└" if i == len(cur_cats)-1 else "├"
+            lines.append(f"{prefix} {get_category_emoji(cat)} {cat}: *{fmt(amt)} ₴* ({pct}%)")
+        lines.append("")
         for ago, label in [(1,"1 мес"),(2,"2 мес"),(3,"3 мес")]:
             s, t = ms(ago)
             if not s: continue
-            diff = int((cur["total"] - s["total"]) / s["total"] * 100)
+            diff = int((cur["total"] - s["total"]) / s["total"] * 100) if s["total"] else 0
             sign = "+" if diff > 0 else ""
-            lines.append(f"{'📈' if diff>0 else '📉'} *{label} назад* ({month_name(t.month)}): {sign}{diff}%")
+            arrow = "📈" if diff > 0 else "📉"
+            lines.append(f"📅 *{month_name(t.month)}* — *{fmt(s['total'])} ₴*  {arrow} {sign}{diff}%")
+            h_cats = sorted(s["by_category"].items(), key=lambda x:-x[1])[:2]
+            for i, (cat, amt) in enumerate(h_cats):
+                prefix = "└" if i == len(h_cats)-1 else "├"
+                lines.append(f"{prefix} {get_category_emoji(cat)} {cat}: *{fmt(amt)} ₴*")
+            lines.append("")
         return "\n".join(lines)
 
 async def build_habits_ai() -> str:
@@ -1551,6 +1595,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     load_settings(); load_user_categories()
     debts.clear(); debt_counter[0] = 0; load_debts()
     goals.clear(); goal_counter[0] = 0; load_goals()
+    installments.clear(); installment_counter[0] = 0; load_installments()
+    recurring.clear(); _recurring_counter[0] = 0; load_recurring()
     await update.message.reply_text(
         "👋 Привет! Я твой финансовый *AI-агент*.\n\n"
         "Просто пиши как обычно:\n"
@@ -1669,13 +1715,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rate = round(rate_raw / 12, 2) if is_annual else rate_raw
             if 0 < rate <= 100 and did in debts:
                 debts[did]["interest"] = rate
-                try:
-                    sh = _debts_sheet()
-                    for i, r in enumerate(sh.get_all_records(), start=2):
-                        if str(r.get("ID")) == str(did):
-                            sh.update_cell(i, 7, rate); break
-                except Exception as e:
-                    logger.error(f"debt_rate_id sheet update: {e}")
+                update_debt_interest(did, rate)
                 annual_note = f" _(годовых {rate_raw}% ÷ 12)_" if is_annual else ""
                 await update.message.reply_text(
                     f"✅ *{debts[did]['name']}* — установлен *{rate}%/мес*{annual_note}\n"
@@ -1926,13 +1966,16 @@ def _regex_route(text: str) -> list | None:
                 (["комунальн","квартир","аренд","оренд","кварплат","жкх","свет","газ",
                   "вода","інтернет","мобільн","мобильн","телефон"], "Коммунальные","🏠"),
             ]
-            category, emoji = "Прочее","📋"
+            category, emoji = None, None  # если не нашли — пусть LLM сам разберётся
             for keywords, cat, em in cat_map:
                 if any(k in desc for k in keywords):
                     category, emoji = cat, em; break
             for uc in _user_categories:
                 if uc.lower() in desc or desc in uc.lower():
                     category = uc; emoji = get_category_emoji(uc); break
+            # Если категория не определена regex — отдаём LLM (он умнее)
+            if category is None:
+                return None
             return [{"action":"expense","expenses":[{"amount":amt,"category":category,"description":desc.capitalize(),"emoji":emoji}]}]
     return None
 
@@ -2503,22 +2546,21 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
     if regex_actions:
         logger.info(f"RegexRouter: '{text[:50]}' → {[a.get('action') for a in regex_actions]}")
         responses = []
-        handled = False  # флаг: хотя бы одно действие обработано (даже если вернуло None)
+        handled = False
         for route in regex_actions:
             try:
                 result = await execute_action(route, update, context, chat_id, text, conv_ctx)
                 if result:
                     responses.append(result)
-                # execute_action вернул None — значит уже отправило сообщение само (напр. new_cats)
-                handled = True
+                handled = True  # execute_action вызвано — действие обработано
             except Exception as e:
                 logger.error(f"regex execute_action {route.get('action')}: {e}")
         if responses:
             combined = "\n\n".join(responses)
             await update.message.reply_text(combined if len(combined) <= 4096 else responses[0], parse_mode="Markdown")
-        # Если regex нашёл и обработал действие — ВСЕГДА выходим, не идём в LLM
         if handled:
             return
+        # handled=False значит все execute_action упали с ошибкой — падаем в LLM
 
     actions = await route_message(text, chat_id, conv_ctx)
     logger.info(f"Router: '{text[:50]}' → {[a.get('action') for a in actions]}")
@@ -2830,13 +2872,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             rate = 0.0
         debts[did]["interest"] = rate
-        try:
-            sh = _debts_sheet()
-            for i, r in enumerate(sh.get_all_records(), start=2):
-                if str(r.get("ID")) == str(did):
-                    sh.update_cell(i, 7, rate); break
-        except Exception as e:
-            logger.error(f"debt_rate update sheet: {e}")
+        update_debt_interest(did, rate)
         if rate > 0:
             ams = d.get("amounts", [])
             txt = (f"✅ *{d['name']}* — {format_amounts(ams)}\n"
