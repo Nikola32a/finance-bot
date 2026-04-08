@@ -2503,15 +2503,21 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
     if regex_actions:
         logger.info(f"RegexRouter: '{text[:50]}' → {[a.get('action') for a in regex_actions]}")
         responses = []
+        handled = False  # флаг: хотя бы одно действие обработано (даже если вернуло None)
         for route in regex_actions:
             try:
                 result = await execute_action(route, update, context, chat_id, text, conv_ctx)
-                if result: responses.append(result)
+                if result:
+                    responses.append(result)
+                # execute_action вернул None — значит уже отправило сообщение само (напр. new_cats)
+                handled = True
             except Exception as e:
                 logger.error(f"regex execute_action {route.get('action')}: {e}")
         if responses:
             combined = "\n\n".join(responses)
             await update.message.reply_text(combined if len(combined) <= 4096 else responses[0], parse_mode="Markdown")
+        # Если regex нашёл и обработал действие — ВСЕГДА выходим, не идём в LLM
+        if handled:
             return
 
     actions = await route_message(text, chat_id, conv_ctx)
@@ -2522,12 +2528,31 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
     set_ctx(chat_id, last_messages=last_msgs[-10:])
 
     responses = []
+    llm_handled = False  # хотя бы одно LLM-действие обработано
     for route in actions:
+        action_name = route.get("action","unknown")
+        if action_name == "unknown":
+            continue
         try:
             result = await execute_action(route, update, context, chat_id, text, conv_ctx)
-            if result: responses.append(result)
+            if result:
+                responses.append(result)
+            # Действие обработано (даже если вернуло None — напр. debt_new с кнопками)
+            llm_handled = True
         except Exception as e:
             logger.error(f"execute_action {route.get('action')}: {e}")
+
+    if responses:
+        combined = "\n\n".join(responses)
+        if len(combined) <= 4096:
+            await update.message.reply_text(combined, parse_mode="Markdown")
+        else:
+            for r in responses: await update.message.reply_text(r, parse_mode="Markdown")
+        return
+
+    # Если LLM обработал (но вернул None — значит сам отправил сообщение) — не идём дальше
+    if llm_handled:
+        return
 
     if not responses:
         if NON_EXPENSE_PATTERNS.search(text):
@@ -2543,15 +2568,15 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
                     amount = float(str(exp.get("amount",0)))
                     if amount <= 0: continue
                     raw_cat = (exp.get("category") or "").strip()
-                    cat = fix_cat(raw_cat, keep_new=True) if raw_cat else "Другое"
-                    is_new = cat not in get_all_categories() and cat != "Другое"
+                    cat = fix_cat(raw_cat, keep_new=True) if raw_cat else "Прочее"
+                    is_new = cat not in get_all_categories()
                     desc = exp.get("description","—")
                     emoji = exp.get("emoji","")
                     save_expense(date, amount, cat, desc, text)
                     lines.append(f"{emoji} *{desc}* — *{fmt(amount)} ₴*\n   _{get_category_emoji(cat)} {cat}_")
                     if is_new and cat not in [c for c,_ in new_cats_fallback]:
                         new_cats_fallback.append((cat, emoji or get_category_emoji(cat)))
-                responses.append("\n".join(lines))
+                await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
                 for new_cat, new_emoji in new_cats_fallback:
                     em = new_emoji or get_category_emoji(new_cat)
                     kb = inline_kb([
@@ -2559,23 +2584,17 @@ async def process(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str)
                         [("Нет, не нужно", "savecat_skip")],
                     ])
                     await update.message.reply_text(
-                        f"💡 Вижу новую категорию {em} *{new_cat}*.\nДобавить её в список?",
                         f"💡 Новая категория {em} *{new_cat}* — добавить в список?",
                         parse_mode="Markdown", reply_markup=kb)
             else:
-                responses.append(
+                await update.message.reply_text(
                     "🤔 Не понял. Попробуй:\n"
                     "• *Трата:* «Кофе 85» или «Бензин 1200»\n"
                     "• *Долг:* «Дал Саше 500» (Саша должен тебе)\n"
                     "• *Возврат:* «Саша вернул 500»\n"
-                    "• *Вопрос:* «Сколько потратил на еду?»"
+                    "• *Вопрос:* «Сколько потратил на еду?»",
+                    parse_mode="Markdown"
                 )
-
-    combined = "\n\n".join(responses)
-    if len(combined) <= 4096:
-        await update.message.reply_text(combined, parse_mode="Markdown")
-    else:
-        for r in responses: await update.message.reply_text(r, parse_mode="Markdown")
 
 
 # ── CALLBACK ─────────────────────────────────────────────────────────────────
