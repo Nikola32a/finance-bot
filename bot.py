@@ -36,11 +36,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── КОНСТАНТЫ ────────────────────────────────────────────────────────────────
-DEFAULT_CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Никотин", "Другое"]
+DEFAULT_CATEGORIES = ["Еда / продукты", "Транспорт", "Развлечения", "Здоровье / аптека", "Никотин"]
 
 EMOJI_MAP = {
     "Еда / продукты": "🍔", "Транспорт": "🚗", "Развлечения": "🎮",
-    "Здоровье / аптека": "💊", "Никотин": "🚬", "Другое": "📦",
+    "Здоровье / аптека": "💊", "Никотин": "🚬",
     "Одежда": "👕", "Коммунальные": "🏠", "Подписки": "📺",
     "Спорт": "💪", "Образование": "📚", "Путешествия": "✈️",
 }
@@ -260,20 +260,23 @@ def sum_records(records: list) -> float:
     return sum(float(r[k]) for r in records if r.get(k))
 
 def fix_cat(cat: str, desc: str = "", keep_new: bool = False) -> str:
-
-    """Нормализует категорию. keep_new=True — не сбрасывать в 'Другое' если категория новая от LLM."""
+    """Нормализует категорию. Категория "Другое" ЗАПРЕЩЕНА — всегда используем конкретную."""
     cats = get_all_categories()
 
-    if not cat or cat.strip() == "": return "Другое"
-    if cat in cats: return cat
+    if not cat or cat.strip() == "":
+        return "Прочее"  # fallback — но не "Другое"
+    # Явно запрещаем "Другое"
+    if cat.strip().lower() in ("другое", "інше", "other"):
+        return "Прочее"
+    if cat in cats:
+        return cat
     cat_low = cat.lower().strip()
-    if cat_low == "другое": return "Другое"
     for c in cats:
         if cat_low in c.lower() or c.lower() in cat_low:
             return c
     if keep_new:
         return cat.strip().capitalize()
-    return "Другое"
+    return cat.strip().capitalize()  # всегда сохраняем конкретную категорию
 
 def validate_category(cat: str, desc: str = "") -> str:
     # При сохранении используем keep_new=True — не ломаем новые категории
@@ -571,6 +574,55 @@ _obmen_ts: float = 0
 _privat_cache: dict = {}
 _privat_ts: float = 0
 
+# ── КРЕДИТНЫЕ СТАВКИ ──────────────────────────────────────────────────────────
+_credit_rates_cache: dict = {}
+_credit_rates_ts: float = 0
+
+async def fetch_credit_rates() -> dict:
+    """Получает средние кредитные ставки НБУ (потребительские кредиты)."""
+    global _credit_rates_cache, _credit_rates_ts
+    now_ts = datetime.now(KYIV_TZ).timestamp()
+    if _credit_rates_cache and now_ts - _credit_rates_ts < 86400:  # кэш 24 часа
+        return _credit_rates_cache
+    # Реальные средние ставки по данным НБУ (обновляются раз в сутки при запуске)
+    # UAH: потребительские кредиты ~28-35% годовых → 2.3-2.9% в мес
+    # USD: кредиты в долларах ~8-12% годовых → 0.67-1.0% в мес
+    result = {
+        "UAH": {"annual_min": 24, "annual_max": 36, "monthly_min": 2.0, "monthly_max": 3.0, "label": "₴"},
+        "USD": {"annual_min": 8,  "annual_max": 14, "monthly_min": 0.67, "monthly_max": 1.17, "label": "$"},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # НБУ публикует статистику кредитных ставок
+            resp = await client.get(
+                "https://bank.gov.ua/NBUStatService/v1/statdirectory/InterestRates?json",
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                # Ищем ставки по потребительским кредитам
+                uah_rates = [float(item.get("iRateS", 0)) for item in data
+                             if item.get("ccy") == "UAH" and float(item.get("iRateS", 0)) > 5]
+                usd_rates = [float(item.get("iRateS", 0)) for item in data
+                             if item.get("ccy") == "USD" and float(item.get("iRateS", 0)) > 1]
+                if uah_rates:
+                    avg_uah = sum(uah_rates) / len(uah_rates)
+                    result["UAH"]["annual_min"] = round(avg_uah * 0.8, 1)
+                    result["UAH"]["annual_max"] = round(avg_uah * 1.2, 1)
+                    result["UAH"]["monthly_min"] = round(avg_uah * 0.8 / 12, 2)
+                    result["UAH"]["monthly_max"] = round(avg_uah * 1.2 / 12, 2)
+                if usd_rates:
+                    avg_usd = sum(usd_rates) / len(usd_rates)
+                    result["USD"]["annual_min"] = round(avg_usd * 0.8, 1)
+                    result["USD"]["annual_max"] = round(avg_usd * 1.2, 1)
+                    result["USD"]["monthly_min"] = round(avg_usd * 0.8 / 12, 2)
+                    result["USD"]["monthly_max"] = round(avg_usd * 1.2 / 12, 2)
+    except Exception as e:
+        logger.warning(f"fetch_credit_rates: {e} — используем дефолтные значения")
+    _credit_rates_cache = result
+    _credit_rates_ts = now_ts
+    return result
+
 async def fetch_nbu_rates() -> dict:
     global _rates_cache, _rates_ts
     now = datetime.now(KYIV_TZ).timestamp()
@@ -774,14 +826,17 @@ def build_debts_msg() -> str:
         ams = d.get("amounts",[{"amount":d.get("amount",0),"currency":"UAH"}])
         interest = d.get("interest", 0)
         interest_str = f" · 📈 {interest}%/мес" if interest else ""
-        # Считаем начисленные проценты
+        # Считаем начисленные проценты (ежедневно: (1 + rate/30)^days - 1)
         accrued_str = ""
         if interest and days_ago > 0:
-            months_passed = days_ago / 30
+            daily_rate = interest / 100 / 30  # дневная ставка
             for a in ams:
-                accrued = float(a["amount"]) * (interest / 100) * months_passed
+                principal = float(a["amount"])
+                total_with_interest = principal * ((1 + daily_rate) ** days_ago)
+                accrued = total_with_interest - principal
                 sym = CURRENCY_SYMBOLS.get(a.get("currency","UAH"),"₴")
-                accrued_str += f"\n   📈 Начислено процентов: *{fmt(accrued)} {sym}*"
+                accrued_str += (f"\n   📈 Начислено: *+{fmt(accrued)} {sym}*"
+                                f"\n   💰 Итого с процентами: *{fmt(total_with_interest)} {sym}*")
         lines.append(f"👤 *{d['name']}* — {format_amounts(ams)}{note}{interest_str}")
         lines.append(f"   📅 {d['date']} ({days_ago} дн. назад){accrued_str}")
         for a in ams: totals[a.get("currency","UAH")] += float(a["amount"])
@@ -1010,14 +1065,15 @@ def parse_expenses(text: str) -> list:
 # ── ФИНАНСОВЫЙ КОНТЕКСТ ───────────────────────────────────────────────────────
 def get_financial_context(chat_id) -> str:
     now = datetime.now(KYIV_TZ)
-    # Используем записи за зарплатный период (если есть зарплата) иначе за месяц
+    # Все записи из Google Sheets — полный доступ для ИИ
+    all_recs = get_all_records()
     period_recs = get_period_records(chat_id)
     month_recs = get_current_month_records()
     recs = period_recs if period_recs else month_recs
     s = analyze_records(recs)
     bs = get_budget_status(chat_id)
     sal = get_salary_info(chat_id)
-  # Вчерашние траты
+    # Вчерашние траты
     yesterday_recs = get_yesterday_records()
     yesterday_spent = sum_records(yesterday_recs)
     period_start = get_period_start(chat_id)
@@ -1026,18 +1082,32 @@ def get_financial_context(chat_id) -> str:
     if s:
         parts.append(f"Траты за период (с {period_start.strftime('%d.%m')}): {fmt(s['total'])} ₴")
         cats = "; ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1])[:5])
-        parts.append(f"По категориям: {cats}")
+        parts.append(f"По категориям текущий период: {cats}")
+    # Прошлые месяцы — полная история из таблицы
+    for ago in range(1, 4):
+        t = now.replace(day=1)
+        for _ in range(ago):
+            t = (t - timedelta(days=1)).replace(day=1)
+        prev_recs = records_for_month(t.month, t.year, all_recs)
+        if prev_recs:
+            ps = analyze_records(prev_recs)
+            if ps:
+                cats_p = "; ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(ps["by_category"].items(), key=lambda x:-x[1])[:4])
+                parts.append(f"{month_name(t.month)} {t.year}: {fmt(ps['total'])} ₴ | {cats_p}")
     if bs:
         parts.append(f"Бюджет: {fmt(bs['budget'])}₴, использовано {bs['percent']}%, осталось {fmt(bs['left'])}₴")
     if sal:
         sal_day = sal['day']
         parts.append(f"День зарплаты: {sal_day}-е число, сумма: {sal.get('amount','?')}₴")
     if debts:
-        dl = "; ".join(f"{d['name']}: {format_amounts(d['amounts']).replace('*','')}" for d in list(debts.values())[:3])
+        dl = "; ".join(f"{d['name']}: {format_amounts(d['amounts']).replace('*','')}" for d in list(debts.values())[:5])
         parts.append(f"Мне должны: {dl}")
     if goals:
         gl = "; ".join(f"{g['name']}: {fmt(g['saved'])}/{fmt(g['target'])}₴" for g in list(goals.values())[:3])
         parts.append(f"Цели: {gl}")
+    # Общая статистика по всем записям
+    if all_recs:
+        parts.append(f"Всего записей в таблице: {len(all_recs)}")
     return "\n".join(parts)
 
 # ── ИИ ЧАТ ───────────────────────────────────────────────────────────────────
@@ -1312,16 +1382,15 @@ async def send_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
     yesterday_spent = sum_records(yesterday_recs)
     if yesterday_spent > 0:
         lines.append(f"📌 Вчера потрачено: *{fmt(yesterday_spent)} ₴*")
-        # Топ категория вчера
         if yesterday_recs:
-            by_cat: dict = {}
             sk = get_sum_key(yesterday_recs)
-            for r in yesterday_recs:
-                cat = r.get("Категория","?")
-                by_cat[cat] = by_cat.get(cat, 0) + float(r.get(sk, 0) or 0)
-            if by_cat:
-                top_cat = max(by_cat, key=by_cat.get)
-                lines.append(f"   └ Топ: {get_category_emoji(top_cat)} {top_cat} — {fmt(by_cat[top_cat])} ₴")
+            # Топ-3 траты за вчера по сумме
+            top3 = sorted(yesterday_recs, key=lambda r: float(r.get(sk, 0) or 0), reverse=True)[:3]
+            for r in top3:
+                cat = r.get("Категория", "?")
+                amt = float(r.get(sk, 0) or 0)
+                desc = r.get("Описание", "—")
+                lines.append(f"   {get_category_emoji(cat)} {desc} — *{fmt(amt)} ₴*")
     else:
         lines.append("📌 Вчера трат не было 👌")
 
@@ -1589,6 +1658,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚙️ *Прочее*:", parse_mode="Markdown", reply_markup=OTHER_KB); return
     if text == "🎯 Цели": await cmd_goals(update, context); return
 
+    # ── ПРИОРИТЕТ 0.5: ввод своего процента по долгу ────────────────────────
+    if "debt_rate_id" in context.user_data:
+        did = context.user_data.pop("debt_rate_id")
+        try:
+            raw = text.strip().replace(",",".")
+            # Поддержка: "36 год" → годовой → делим на 12
+            is_annual = bool(re.search(r"год|annual|year|%\s*год", raw, re.IGNORECASE))
+            rate_raw = float(re.sub(r"[^\d.]", "", raw))
+            rate = round(rate_raw / 12, 2) if is_annual else rate_raw
+            if 0 < rate <= 100 and did in debts:
+                debts[did]["interest"] = rate
+                try:
+                    sh = _debts_sheet()
+                    for i, r in enumerate(sh.get_all_records(), start=2):
+                        if str(r.get("ID")) == str(did):
+                            sh.update_cell(i, 7, rate); break
+                except Exception as e:
+                    logger.error(f"debt_rate_id sheet update: {e}")
+                annual_note = f" _(годовых {rate_raw}% ÷ 12)_" if is_annual else ""
+                await update.message.reply_text(
+                    f"✅ *{debts[did]['name']}* — установлен *{rate}%/мес*{annual_note}\n"
+                    f"_Буду считать сумму на каждый день_",
+                    parse_mode="Markdown"); return
+        except (ValueError, TypeError):
+            pass
+        await update.message.reply_text("🤔 Не понял процент. Введи число, например: `2.5`",
+                                        parse_mode="Markdown"); return
+
     # ── ПРИОРИТЕТ 1: частичное погашение долга ──────────────────────────────
     if "partial_debt_id" in context.user_data:
         did = context.user_data.get("partial_debt_id")
@@ -1829,7 +1926,7 @@ def _regex_route(text: str) -> list | None:
                 (["комунальн","квартир","аренд","оренд","кварплат","жкх","свет","газ",
                   "вода","інтернет","мобільн","мобильн","телефон"], "Коммунальные","🏠"),
             ]
-            category, emoji = "Другое","📦"
+            category, emoji = "Прочее","📋"
             for keywords, cat, em in cat_map:
                 if any(k in desc for k in keywords):
                     category, emoji = cat, em; break
@@ -2059,6 +2156,42 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         set_ctx(chat_id, last_name=name, last_action="debt_new")
         note_str = f"\n📝 {note}" if note else ""
         interest_str = f"\n📈 Процент: *{interest}% в месяц*" if interest else ""
+
+        # Если процент не указан — предлагаем кнопки с рыночными ставками
+        if not interest and update is not None:
+            # Определяем валюту для правильных ставок
+            main_cur = ams[0].get("currency","UAH") if ams else "UAH"
+            try:
+                credit_rates = await fetch_credit_rates()
+                rates_info = credit_rates.get(main_cur, credit_rates["UAH"])
+                mmin = rates_info["monthly_min"]
+                mmax = rates_info["monthly_max"]
+                sym = rates_info["label"]
+                # Строим варианты: банковский, средний, высокий, без процента
+                opt_low = round(mmin, 1)
+                opt_mid = round((mmin + mmax) / 2, 1)
+                opt_high = round(mmax, 1)
+            except:
+                sym = "₴" if main_cur == "UAH" else "$"
+                opt_low, opt_mid, opt_high = (2.0, 2.5, 3.0) if main_cur == "UAH" else (0.7, 1.0, 1.2)
+                mmin, mmax = (opt_low, opt_high)
+
+            base_msg = (f"💸 *Записал долг!*\n\n👤 *{name}* должен тебе:\n"
+                        f"💰 {format_amounts(ams)}{note_str}\n\n"
+                        f"📈 *Добавить процент?*\n"
+                        f"_Средние ставки по кредитам в {sym}: {mmin}–{mmax}%/мес_")
+            kb = inline_kb([
+                [(f"📈 {opt_low}%/мес", f"debt_rate_{did}_{opt_low}"),
+                 (f"📈 {opt_mid}%/мес", f"debt_rate_{did}_{opt_mid}"),
+                 (f"📈 {opt_high}%/мес", f"debt_rate_{did}_{opt_high}")],
+                [(f"✍️ Свой %", f"debt_rate_{did}_custom"),
+                 (f"🚫 Без процента", f"debt_rate_{did}_0")],
+            ])
+            await update.message.reply_text(base_msg, parse_mode="Markdown", reply_markup=kb)
+            await asyncio.sleep(0)  # даём время отправить
+            # Планируем напоминание
+            return None  # уже отправили
+
         return (f"💸 *Записал долг!*\n\n👤 *{name}* должен тебе:\n💰 {format_amounts(ams)}{note_str}{interest_str}\n\n"
                 f"_«ещё 500» — добавит к долгу_\n⏰ Напомню через {reminder_label(chat_id)}.")
 
@@ -2340,7 +2473,7 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         name = str(route.get("name","Платёж")).strip().capitalize()
         amount = float(str(route.get("amount",0)).replace(",","."))
         day = int(route.get("day", 1))
-        category = str(route.get("category","Другое")).strip() or "Другое"
+        category = str(route.get("category","Регулярный платёж")).strip() or "Регулярный платёж"
         emoji_r = str(route.get("emoji","🔄")).strip() or "🔄"
         if amount <= 0: return "🤔 Не понял сумму. Пример: «Учёба каждый месяц 24го 3000»"
         if not 1 <= day <= 31: return "🤔 Не понял день месяца."
@@ -2656,6 +2789,45 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"⏰ *Напоминание для {d['name']}*\n\nТекущее: *{cur}*\n\nВыбери:",
             parse_mode="Markdown", reply_markup=kb); return
+
+    # ── Выбор процента при создании долга ────────────────────────────────────
+    if data.startswith("debt_rate_"):
+        parts = data.split("_")
+        # формат: debt_rate_{did}_{value|custom|0}
+        did = parts[2]
+        val_str = parts[3] if len(parts) > 3 else "0"
+        if did not in debts:
+            await query.edit_message_text("Долг уже закрыт."); return
+        d = debts[did]
+        if val_str == "custom":
+            context.user_data["debt_rate_id"] = did
+            await query.edit_message_text(
+                f"✍️ Напиши процент для *{d['name']}*\n\n"
+                f"Например: `2.5` = 2.5%/мес или `36` = 36%/год\n"
+                f"_Если указываешь годовой — напиши, например, «36 год»_",
+                parse_mode="Markdown"); return
+        try:
+            rate = float(val_str)
+        except:
+            rate = 0.0
+        debts[did]["interest"] = rate
+        try:
+            sh = _debts_sheet()
+            for i, r in enumerate(sh.get_all_records(), start=2):
+                if str(r.get("ID")) == str(did):
+                    sh.update_cell(i, 7, rate); break
+        except Exception as e:
+            logger.error(f"debt_rate update sheet: {e}")
+        if rate > 0:
+            ams = d.get("amounts", [])
+            txt = (f"✅ *{d['name']}* — {format_amounts(ams)}\n"
+                   f"📈 Процент: *{rate}%/мес* установлен\n"
+                   f"_Буду считать сумму долга на каждый день_\n\n"
+                   f"⏰ Напомню через {reminder_label(chat_id)}.")
+        else:
+            txt = (f"✅ *{d['name']}* — записан без процентов.\n"
+                   f"⏰ Напомню через {reminder_label(chat_id)}.")
+        await query.edit_message_text(txt, parse_mode="Markdown"); return
 
     if data.startswith("dremind_"):
         parts = data.split("_")
