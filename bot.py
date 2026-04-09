@@ -842,7 +842,7 @@ def format_amounts(amounts: list) -> str:
 def build_debts_msg() -> str:
     if not debts: return "✅ Активных долгов нет!"
     lines = ["💸 *Мне должны:*\n"]
-    totals: dict = defaultdict(float)
+    totals: dict = defaultdict(float)  # итоговые суммы с процентами
     for d in debts.values():
         try:
             days_ago = (datetime.now(KYIV_TZ) - datetime.strptime(d["date"], "%d.%m.%Y").replace(tzinfo=KYIV_TZ)).days
@@ -852,20 +852,24 @@ def build_debts_msg() -> str:
         ams = d.get("amounts",[{"amount":d.get("amount",0),"currency":"UAH"}])
         interest = d.get("interest", 0)
         interest_str = f" · 📈 {interest}%/мес" if interest else ""
-        # Считаем начисленные проценты (ежедневно: (1 + rate/30)^days - 1)
         accrued_str = ""
         if interest and days_ago > 0:
-            daily_rate = interest / 100 / 30  # дневная ставка
+            daily_rate = interest / 100 / 30
             for a in ams:
                 principal = float(a["amount"])
                 total_with_interest = principal * ((1 + daily_rate) ** days_ago)
                 accrued = total_with_interest - principal
                 sym = CURRENCY_SYMBOLS.get(a.get("currency","UAH"),"₴")
                 accrued_str += (f"\n   📈 Начислено: *+{fmt(accrued)} {sym}*"
-                                f"\n   💰 Итого с процентами: *{fmt(total_with_interest)} {sym}*")
+                                f"\n   💰 Итого с %: *{fmt(total_with_interest)} {sym}*")
+                # В итог добавляем сумму С процентами
+                totals[a.get("currency","UAH")] += total_with_interest
+        else:
+            # Без процентов — добавляем голую сумму
+            for a in ams:
+                totals[a.get("currency","UAH")] += float(a["amount"])
         lines.append(f"👤 *{d['name']}* — {format_amounts(ams)}{note}{interest_str}")
         lines.append(f"   📅 {d['date']} ({days_ago} дн. назад){accrued_str}")
-        for a in ams: totals[a.get("currency","UAH")] += float(a["amount"])
     if totals:
         lines.append("")
         for cur in ["USD","EUR","UAH"]:
@@ -886,8 +890,11 @@ def _installments_sheet():
 
 def load_installments():
     try:
-        for r in _installments_sheet().get_all_records():
-            if r.get("Статус") != "активна": continue
+        rows = _installments_sheet().get_all_records()
+        logger.info(f"load_installments: найдено {len(rows)} записей")
+        for r in rows:
+            status = str(r.get("Статус","")).strip().lower()
+            if status not in ("активна", "активен", "active"): continue
             iid = str(r["ID"])
             installments[iid] = {
                 "name": r["Название"],
@@ -899,6 +906,7 @@ def load_installments():
             }
             try: installment_counter[0] = max(installment_counter[0], int(r["ID"]))
             except: pass
+        logger.info(f"load_installments: загружено {len(installments)} активных рассрочек")
     except Exception as e:
         logger.error(f"load_installments: {e}")
 
@@ -941,10 +949,15 @@ def _recurring_sheet():
         sh.insert_row(["ID","Название","Сумма","День","Категория","Emoji","Статус"], 1)
     return sh
 
+_recurring_counter = [0]  # объявляем ДО load_recurring
+
 def load_recurring():
     try:
-        for r in _recurring_sheet().get_all_records():
-            if r.get("Статус") != "активен": continue
+        rows = _recurring_sheet().get_all_records()
+        logger.info(f"load_recurring: найдено {len(rows)} записей")
+        for r in rows:
+            status = str(r.get("Статус","")).strip().lower()
+            if status not in ("активен", "активна", "active"): continue
             rid = str(r["ID"])
             recurring[rid] = {
                 "name": r["Название"],
@@ -970,8 +983,6 @@ def delete_recurring_from_sheet(rid):
             if str(r.get("ID")) == str(rid):
                 sh.update_cell(i, 7, "удалён"); return
     except Exception as e: logger.error(f"delete_recurring: {e}")
-
-_recurring_counter = [0]
 
 def build_recurring_msg() -> str:
     if not recurring:
@@ -2051,13 +2062,27 @@ def _regex_route(text: str) -> list | None:
 
     # Напоминание о долге с расписанием — "напоминай о долге Саши каждую среду"
     m_remind = re.search(
-        r"напомин\w+\s+(?:о\s+)?долг\w*\s+(\w+).+?(каждую?\s+\w+|\d+\s+и\s+\d+\s+числ\w*|\d+[-\s]?го\s+и\s+\d+[-\s]?го|\d{1,2}\s+числ\w*)",
+        r"напомин\w+\s+(?:мне\s+)?(?:о\s+)?долг\w*\s+([А-ЯЁа-яёіїєa-zA-Z][А-ЯЁа-яёіїєa-zA-Z\s]{0,30}?)\s+"
+        r"(каждую?\s+\w+|\d+\s+и\s+\d+\s+числ\w*|\d+[-\s]?го\s+и\s+\d+[-\s]?го|\d{1,2}\s+числ\w*|каждые?\s+\d+\s*\w*)",
         t, re.IGNORECASE
     )
     if m_remind:
-        name_hint = m_remind.group(1).strip().capitalize()
+        name_hint = m_remind.group(1).strip().rstrip("аяоуьий").strip().capitalize()
+        # Убираем падежные окончания: "Саши" → "Саша", "Артёма" → "Артём — ищем в debts
         sched_text = m_remind.group(2).strip()
-        return [{"action":"debt_remind_schedule","name":name_hint,"schedule_text":sched_text}]
+        # Нечёткий поиск имени среди существующих долгов
+        found_name = name_hint
+        for d in debts.values():
+            dname = d["name"].lower()
+            hint_low = name_hint.lower()
+            # Совпадение по началу имени (минимум 3 символа)
+            if len(hint_low) >= 3 and (dname.startswith(hint_low[:3]) or hint_low.startswith(dname[:3])):
+                found_name = d["name"]
+                break
+            if hint_low in dname or dname in hint_low:
+                found_name = d["name"]
+                break
+        return [{"action":"debt_remind_schedule","name":found_name,"schedule_text":sched_text}]
 
     # Рассрочка — оплата (до проверки не-трат чтобы не пропустить)
     if re.search(r"оплатил|заплатил|внёс|вніс", t, re.IGNORECASE) and \
@@ -2652,15 +2677,26 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
             logger.error(f"expense_edit: {e}"); return "❌ Не удалось обновить запись."
 
     elif action == "debt_remind_schedule":
-        name = str(route.get("name", conv_ctx.get("last_name",""))).strip().capitalize()
+        name_raw = str(route.get("name", conv_ctx.get("last_name",""))).strip()
         sched_text = str(route.get("schedule_text", text))
-        did = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None) if name else None
-        if not did and debts: did = list(debts.keys())[-1]
+        # Нечёткий поиск среди активных долгов
+        did = None
+        name_low = name_raw.lower()
+        # 1. Точное совпадение
+        did = next((k for k,d in debts.items() if d["name"].lower() == name_low), None)
+        # 2. Частичное совпадение
+        if not did:
+            did = next((k for k,d in debts.items() if name_low in d["name"].lower() or d["name"].lower() in name_low), None)
+        # 3. По первым 3 символам
+        if not did and len(name_low) >= 3:
+            did = next((k for k,d in debts.items() if d["name"].lower().startswith(name_low[:3]) or name_low.startswith(d["name"].lower()[:3])), None)
+        # 4. Последний добавленный долг
+        if not did and debts:
+            did = list(debts.keys())[-1]
         if not did: return "🤔 Нет активных долгов."
         d = debts[did]
         sched = _parse_debt_schedule(sched_text)
         if not sched:
-            # Попробуем распарсить из числового интервала (каждые N дней)
             m_days = re.search(r"(\d+)\s*(?:дн|день|недел\w*|week)", sched_text, re.IGNORECASE)
             if m_days:
                 n = int(m_days.group(1))
