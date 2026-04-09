@@ -87,30 +87,44 @@ JUST_NUMBER_PATTERN = re.compile(
     re.IGNORECASE
 )
 def _parse_amount_str(s: str) -> float | None:
-    """Универсальный парсер суммы: '2262,33' → 2262.33, '3к' → 3000, '1 500' → 1500."""
+    """Универсальный парсер суммы.
+    '2262,33' → 2262.33  |  '2003.33' → 2003.33  |  '1.500' → 1500  |  '3к' → 3000  |  '1 500' → 1500
+    Правила разделителей:
+      - точка с ровно 3 цифрами после → тысячный разделитель (1.500 → 1500)
+      - точка с 1-2 цифрами → дробная часть (2003.33 → 2003.33)
+      - запятая с ровно 3 цифрами → тысячный разделитель (1,500 → 1500)
+      - запятая с 1-2 цифрами → дробная часть (2262,33 → 2262.33)
+    """
     s = s.strip()
-    # Убираем валютные символы
     s = re.sub(r"\s*(?:₴|грн\.?|uah)\s*$", "", s, flags=re.IGNORECASE).strip()
-    # Тысячный разделитель пробел: "1 500" → "1500"
-    # Если запятая разделитель тысяч (1,500) или дробная (2262,33) — нужно различить
-    # Правило: если после запятой ровно 3 цифры и нет точки → тысячный разделитель
-    # Если после запятой 1-2 цифры → дробная часть
     s_nospace = s.replace(" ", "")
     mult = 1
     if re.search(r"к(?:р|ривень|уб)?$|тис", s_nospace, re.IGNORECASE):
         mult = 1000
         s_nospace = re.sub(r"[кКтТис]+.*$", "", s_nospace, flags=re.IGNORECASE)
-    # Нормализуем разделители
-    if "," in s_nospace and "." not in s_nospace:
-        # Проверяем: если после запятой ровно 3 цифры — тысячный разделитель
+
+    # Оба разделителя: европейский формат "1.500,50" или "1,500.50"
+    if "." in s_nospace and "," in s_nospace:
+        # Определяем какой идёт последним — тот дробный
+        last_dot = s_nospace.rfind(".")
+        last_comma = s_nospace.rfind(",")
+        if last_dot > last_comma:
+            # "1,500.50" — запятая тысячный, точка дробная
+            s_nospace = s_nospace.replace(",", "")
+        else:
+            # "1.500,50" — точка тысячный, запятая дробная
+            s_nospace = s_nospace.replace(".", "").replace(",", ".")
+    elif "," in s_nospace:
         m = re.match(r"^(\d+),(\d+)$", s_nospace)
         if m and len(m.group(2)) == 3:
-            s_nospace = s_nospace.replace(",", "")  # убираем разделитель тысяч
+            s_nospace = s_nospace.replace(",", "")   # тысячный разделитель
         else:
             s_nospace = s_nospace.replace(",", ".")  # дробная часть
-    elif "." in s_nospace and "," in s_nospace:
-        # "1.500,50" европейский формат
-        s_nospace = s_nospace.replace(".", "").replace(",", ".")
+    elif "." in s_nospace:
+        m = re.match(r"^(\d+)\.(\d+)$", s_nospace)
+        if m and len(m.group(2)) == 3:
+            s_nospace = s_nospace.replace(".", "")   # тысячный разделитель (1.500 → 1500)
+        # иначе оставляем как есть (2003.33 → 2003.33)
     try:
         return float(s_nospace) * mult
     except:
@@ -1131,8 +1145,35 @@ _ai_chat_history: dict = {}
 async def ai_chat_response(chat_id, user_message: str) -> str:
     if chat_id not in _ai_chat_history: _ai_chat_history[chat_id] = []
     history = _ai_chat_history[chat_id]
-    system = f"""Ты умный финансовый ИИ-ассистент. Отвечай кратко и по делу (3-5 предложений).
-Долги — это деньги которые ТЕБЕ должны другие люди. Будь дружелюбным, с эмодзи.
+    system = f"""Ты личный финансовый ИИ-ассистент в Telegram. Отвечай КРАСИВО и СТРУКТУРИРОВАНО.
+
+ПРАВИЛА ФОРМАТИРОВАНИЯ (ОБЯЗАТЕЛЬНО):
+- Используй *жирный* для цифр и ключевых слов
+- Каждый факт/блок — с новой строки
+- Эмодзи в начале каждой смысловой строки
+- Максимум 5-7 строк в ответе — кратко и по делу
+- НЕ пиши сплошным текстом — только структура
+- Числа всегда с пробелами: *11 855 $*, *300 ₴* (не "11855$")
+- При перечислении долгов — каждый долг на отдельной строке
+
+ФОРМАТ ДЛЯ РАЗНЫХ ЗАПРОСОВ:
+
+Вопрос о долгах → карточки:
+👤 *Имя* — *сумма* (N дн.)
+👤 *Имя* — *сумма* (N дн.)
+💰 Итого: *X $* + *Y ₴*
+
+Вопрос о тратах → блоки:
+📊 *Категория:* X ₴ (N%)
+📊 *Категория:* X ₴ (N%)
+💡 *Вывод:* одна строка
+
+Совет → нумерованный список:
+💡 *Персональные советы*
+
+1️⃣ *Совет с цифрой* — объяснение
+2️⃣ *Совет с цифрой* — объяснение
+3️⃣ *Совет с цифрой* — объяснение
 
 ДАННЫЕ ПОЛЬЗОВАТЕЛЯ:
 {get_financial_context(chat_id)}"""
@@ -1362,10 +1403,19 @@ async def build_advice_ai(chat_id) -> str:
 - Частые траты: {leaks or 'нет'}
 - Цели: {goals_info}
 
-Напиши 3-4 совета:
-- Заголовок 💡 *Персональные советы*
-- Каждый совет с конкретной цифрой
-- Тон: дружелюбный, практичный"""
+ФОРМАТ ОТВЕТА (строго):
+💡 *Персональные советы*
+
+1️⃣ *[Конкретное действие]* — [цифра экономии/выгоды]
+2️⃣ *[Конкретное действие]* — [цифра экономии/выгоды]
+3️⃣ *[Конкретное действие]* — [цифра экономии/выгоды]
+
+📊 *Прогноз месяца:* ~{fmt(avg*30)} ₴
+
+ПРАВИЛА:
+- Каждый совет — одна строка с конкретной цифрой
+- Без вводных слов ("конечно", "давай", "итак")
+- Числа форматируй с пробелами: 12 000 ₴ (не 12000)"""
     messages = [{"role":"system","content":"Отвечай только на русском. Markdown через *. Конкретные цифры важны."},
                 {"role":"user","content":prompt}]
     try:
@@ -1380,11 +1430,147 @@ async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
     if not did or did not in debts or not cid: return
     d = debts[did]
     ams = d.get("amounts",[])
+    interest = d.get("interest", 0)
+    now = datetime.now(KYIV_TZ)
+    days_ago = 0
+    try:
+        days_ago = (now - datetime.strptime(d["date"], "%d.%m.%Y").replace(tzinfo=KYIV_TZ)).days
+    except: pass
+    # Считаем текущую сумму с процентами
+    interest_line = ""
+    if interest and days_ago > 0:
+        daily_rate = interest / 100 / 30
+        total_now = sum(float(a["amount"]) * ((1 + daily_rate) ** days_ago) for a in ams)
+        principal = sum(float(a["amount"]) for a in ams)
+        accrued = total_now - principal
+        sym = CURRENCY_SYMBOLS.get(ams[0].get("currency","UAH"),"₴") if ams else "₴"
+        interest_line = f"\n📈 С процентами: *{fmt(total_now)} {sym}* (+{fmt(accrued)} {sym})"
     kb = inline_kb([[("✅ Вернули","paid_"+did),("⏰ Напомнить ещё","remind_"+did)]])
     await context.bot.send_message(
         chat_id=cid,
-        text=f"⏰ *Напоминание о долге*\n\n👤 *{d['name']}* должен тебе {format_amounts(ams)}",
+        text=(f"⏰ *Напоминание о долге*\n\n"
+              f"👤 *{d['name']}* должен тебе {format_amounts(ams)}\n"
+              f"📅 Дата выдачи: {d['date']} ({days_ago} дн. назад)"
+              f"{interest_line}"),
         parse_mode="Markdown", reply_markup=kb)
+    # Перепланируем следующее напоминание если есть расписание
+    sched = get_setting(f"debt_schedule_{did}")
+    if sched and context.job_queue:
+        _schedule_debt_reminder(context.job_queue, did, cid, sched)
+
+def _parse_debt_schedule(text: str) -> dict | None:
+    """Парсит расписание напоминания о долге из текста.
+    'каждую среду' → {type:'weekday', weekday:2}
+    'каждый вторник' → {type:'weekday', weekday:1}
+    '1 и 24 числа' / 'первого и 24' → {type:'monthdays', days:[1,24]}
+    'каждые 2 недели' → {type:'interval', days:14}
+    """
+    t = text.lower()
+    # Дни недели
+    wd_map = {
+        "понедельник":0,"пн":0,"monday":0,
+        "вторник":1,"вт":1,"tuesday":1,
+        "среду":2,"среда":2,"ср":2,"wednesday":2,
+        "четверг":3,"чт":3,"thursday":3,
+        "пятницу":4,"пятница":4,"пт":4,"friday":4,
+        "субботу":5,"суббота":5,"сб":5,"saturday":5,
+        "воскресенье":6,"воскресенье":6,"вс":6,"sunday":6,
+    }
+    for word, wd in wd_map.items():
+        if word in t:
+            return {"type": "weekday", "weekday": wd}
+    # Конкретные числа месяца: "1 и 24", "первого и 24", "1го и 15го"
+    nums = re.findall(r"\b(\d{1,2})[-\s]?(?:го|е|е|ого)?\b", t)
+    if len(nums) >= 2:
+        days = [int(n) for n in nums if 1 <= int(n) <= 31]
+        if len(days) >= 2:
+            return {"type": "monthdays", "days": sorted(set(days))}
+    if len(nums) == 1:
+        d = int(nums[0])
+        if 1 <= d <= 31:
+            return {"type": "monthdays", "days": [d]}
+    return None
+
+def _schedule_debt_reminder(job_queue, did: str, chat_id, sched_str: str):
+    """Планирует напоминание по сохранённому расписанию."""
+    try:
+        sched = json.loads(sched_str) if isinstance(sched_str, str) else sched_str
+    except:
+        return
+    # Отменяем старые задачи
+    for job in job_queue.get_jobs_by_name(f"debt_{did}"):
+        job.schedule_removal()
+    now = datetime.now(KYIV_TZ)
+    remind_time = dtime(9, 0, tzinfo=KYIV_TZ)
+    stype = sched.get("type")
+    if stype == "weekday":
+        wd = sched["weekday"]  # 0=пн ... 6=вс
+        # Telegram weekdays: 0=вс(Sunday), пн=1 ... сб=6
+        tg_day = (wd + 1) % 7
+        job_queue.run_daily(send_debt_reminder, time=remind_time,
+            days=(tg_day,), data={"debt_id":did,"chat_id":chat_id},
+            name=f"debt_{did}")
+    elif stype == "monthdays":
+        days = sched.get("days", [])
+        for day in days:
+            # Считаем когда следующее вхождение этого числа
+            try:
+                next_dt = now.replace(day=day, hour=9, minute=0, second=0, microsecond=0)
+                if next_dt <= now:
+                    # Следующий месяц
+                    nm = (now.replace(day=1) + timedelta(days=32)).replace(day=1)
+                    next_dt = nm.replace(day=min(day, 28), hour=9, minute=0, second=0, microsecond=0)
+                job_queue.run_once(send_debt_reminder,
+                    when=next_dt - now,
+                    data={"debt_id":did,"chat_id":chat_id},
+                    name=f"debt_{did}")
+            except ValueError:
+                pass
+    elif stype == "interval":
+        interval_days = sched.get("days", 14)
+        job_queue.run_once(send_debt_reminder,
+            when=timedelta(days=interval_days),
+            data={"debt_id":did,"chat_id":chat_id},
+            name=f"debt_{did}")
+
+def _sched_label(sched_str: str) -> str:
+    """Возвращает читаемое описание расписания."""
+    try:
+        sched = json.loads(sched_str) if isinstance(sched_str, str) else sched_str
+    except:
+        return sched_str or "каждые 2 недели"
+    stype = sched.get("type")
+    wd_names = ["понедельник","вторник","среду","четверг","пятницу","субботу","воскресенье"]
+    if stype == "weekday":
+        return f"каждую {wd_names[sched['weekday']]}"
+    elif stype == "monthdays":
+        days = sched.get("days",[])
+        return "каждое " + " и ".join(f"{d}-е" for d in days) + " число"
+    elif stype == "interval":
+        d = sched.get("days",14)
+        return DAYS_LABELS.get(d, f"каждые {d} дней")
+    return "каждые 2 недели"
+
+def restore_debt_reminders(job_queue):
+    """Восстанавливает все напоминания о долгах после рестарта."""
+    if not CHAT_ID or not job_queue: return
+    restored = 0
+    for did, d in debts.items():
+        sched_str = get_setting(f"debt_schedule_{did}")
+        if sched_str:
+            try:
+                _schedule_debt_reminder(job_queue, did, CHAT_ID, sched_str)
+                restored += 1
+            except Exception as e:
+                logger.error(f"restore_debt_reminder {did}: {e}")
+        else:
+            # Нет расписания — ставим дефолтное (каждые 2 недели)
+            default_sched = json.dumps({"type":"interval","days":14})
+            job_queue.run_once(send_debt_reminder,
+                when=get_reminder_interval(CHAT_ID),
+                data={"debt_id":did,"chat_id":CHAT_ID},
+                name=f"debt_{did}")
+    logger.info(f"restore_debt_reminders: восстановлено {restored}, дефолт для {len(debts)-restored}")
 
 async def send_weekly_insight(context: ContextTypes.DEFAULT_TYPE):
     cid = (context.job.data or {}).get("chat_id") or CHAT_ID
@@ -1704,6 +1890,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚙️ *Прочее*:", parse_mode="Markdown", reply_markup=OTHER_KB); return
     if text == "🎯 Цели": await cmd_goals(update, context); return
 
+    # ── ПРИОРИТЕТ 0.4: ввод своих чисел месяца для напоминания ─────────────────
+    if "debt_custom_sched_id" in context.user_data:
+        did = context.user_data.pop("debt_custom_sched_id")
+        nums = re.findall(r"\b(\d{1,2})\b", text)
+        days_list = sorted(set(int(n) for n in nums if 1 <= int(n) <= 31))
+        if days_list and did in debts:
+            sched = {"type":"monthdays","days":days_list}
+            sched_str = json.dumps(sched, ensure_ascii=False)
+            save_setting(f"debt_schedule_{did}", sched_str)
+            if context.job_queue:
+                _schedule_debt_reminder(context.job_queue, did, chat_id, sched_str)
+            label = _sched_label(sched_str)
+            await update.message.reply_text(
+                f"✅ Буду напоминать о *{debts[did]['name']}* — *{label}* 🔔",
+                parse_mode="Markdown"); return
+        await update.message.reply_text("🤔 Не понял числа. Напиши например: `1 и 24`",
+                                        parse_mode="Markdown"); return
+
     # ── ПРИОРИТЕТ 0.5: ввод своего процента по долгу ────────────────────────
     if "debt_rate_id" in context.user_data:
         did = context.user_data.pop("debt_rate_id")
@@ -1844,6 +2048,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── REGEX-РОУТЕР ──────────────────────────────────────────────────────────────
 def _regex_route(text: str) -> list | None:
     t = text.strip()
+
+    # Напоминание о долге с расписанием — "напоминай о долге Саши каждую среду"
+    m_remind = re.search(
+        r"напомин\w+\s+(?:о\s+)?долг\w*\s+(\w+).+?(каждую?\s+\w+|\d+\s+и\s+\d+\s+числ\w*|\d+[-\s]?го\s+и\s+\d+[-\s]?го|\d{1,2}\s+числ\w*)",
+        t, re.IGNORECASE
+    )
+    if m_remind:
+        name_hint = m_remind.group(1).strip().capitalize()
+        sched_text = m_remind.group(2).strip()
+        return [{"action":"debt_remind_schedule","name":name_hint,"schedule_text":sched_text}]
 
     # Рассрочка — оплата (до проверки не-трат чтобы не пропустить)
     if re.search(r"оплатил|заплатил|внёс|вніс", t, re.IGNORECASE) and \
@@ -1989,6 +2203,7 @@ debt_new: {{"action":"debt_new","name":"N","amounts":[{{"amount":N,"currency":"U
 debt_add: {{"action":"debt_add","name":"N","amount":N,"currency":"UAH"}}
 debt_return: {{"action":"debt_return","name":"N","amount":N,"currency":"UAH"}}
 debt_remind: {{"action":"debt_remind","name":"N","minutes":N}}
+debt_remind_schedule: {{"action":"debt_remind_schedule","name":"N","schedule_text":"каждую среду"}}
 budget_set: {{"action":"budget_set","amount":N}}
 salary_set: {{"action":"salary_set","day":N,"amount":N}}
 goal_new: {{"action":"goal_new","name":"N","amount":N,"emoji":"E"}}
@@ -2436,6 +2651,32 @@ async def execute_action(route: dict, update, context, chat_id: int, text: str, 
         except Exception as e:
             logger.error(f"expense_edit: {e}"); return "❌ Не удалось обновить запись."
 
+    elif action == "debt_remind_schedule":
+        name = str(route.get("name", conv_ctx.get("last_name",""))).strip().capitalize()
+        sched_text = str(route.get("schedule_text", text))
+        did = next((k for k,d in debts.items() if name.lower() in d["name"].lower()), None) if name else None
+        if not did and debts: did = list(debts.keys())[-1]
+        if not did: return "🤔 Нет активных долгов."
+        d = debts[did]
+        sched = _parse_debt_schedule(sched_text)
+        if not sched:
+            # Попробуем распарсить из числового интервала (каждые N дней)
+            m_days = re.search(r"(\d+)\s*(?:дн|день|недел\w*|week)", sched_text, re.IGNORECASE)
+            if m_days:
+                n = int(m_days.group(1))
+                if "недел" in sched_text.lower() or "week" in sched_text.lower():
+                    n *= 7
+                sched = {"type":"interval","days":n}
+            else:
+                return f"🤔 Не понял расписание. Попробуй:\n• «каждую среду»\n• «1 и 24 числа»\n• «каждые 2 недели»"
+        sched_str = json.dumps(sched, ensure_ascii=False)
+        save_setting(f"debt_schedule_{did}", sched_str)
+        if context.job_queue:
+            _schedule_debt_reminder(context.job_queue, did, chat_id, sched_str)
+        label = _sched_label(sched_str)
+        set_ctx(chat_id, last_name=d["name"], last_action="debt_remind")
+        return f"✅ Буду напоминать о долге *{d['name']}* — *{label}* 🔔"
+
     elif action == "debt_remind":
         name = str(route.get("name", conv_ctx.get("last_name",""))).strip().capitalize()
         minutes = float(route.get("minutes", route.get("hours",24)*60))
@@ -2840,15 +3081,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         did = data[21:]
         if did not in debts: await query.edit_message_text("Долг уже закрыт."); return
         d = debts[did]
-        cur = get_setting(f"debt_reminder_{did}") or reminder_label(chat_id)
+        cur_sched = get_setting(f"debt_schedule_{did}")
+        cur_label = _sched_label(cur_sched) if cur_sched else reminder_label(chat_id)
         kb = inline_kb([
             [("1 день",f"dremind_{did}_1"),("3 дня",f"dremind_{did}_3")],
             [("1 неделю",f"dremind_{did}_7"),("2 недели",f"dremind_{did}_14")],
-            [("3 недели",f"dremind_{did}_21"),("1 месяц",f"dremind_{did}_30")],
+            [("1 месяц",f"dremind_{did}_30")],
+            [("📅 Каждый пн",f"dremsched_{did}_weekday_0"),("📅 Каждую ср",f"dremsched_{did}_weekday_2"),("📅 Каждую пт",f"dremsched_{did}_weekday_4")],
+            [("✍️ Свои числа месяца",f"dremsched_{did}_custom")],
             [("← Назад",f"debt_menu_{did}")],
         ])
         await query.edit_message_text(
-            f"⏰ *Напоминание для {d['name']}*\n\nТекущее: *{cur}*\n\nВыбери:",
+            f"⏰ *Напоминание для {d['name']}*\n\nТекущее: *{cur_label}*\n\nВыбери интервал или день:",
             parse_mode="Markdown", reply_markup=kb); return
 
     # ── Выбор процента при создании долга ────────────────────────────────────
@@ -2884,11 +3128,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    f"⏰ Напомню через {reminder_label(chat_id)}.")
         await query.edit_message_text(txt, parse_mode="Markdown"); return
 
+    if data.startswith("dremsched_"):
+        # dremsched_{did}_weekday_{n}  или  dremsched_{did}_custom
+        parts = data.split("_")
+        did = parts[1]
+        mode = parts[2] if len(parts) > 2 else ""
+        if did not in debts: await query.edit_message_text("Долг уже закрыт."); return
+        d = debts[did]
+        if mode == "custom":
+            context.user_data["debt_custom_sched_id"] = did
+            await query.edit_message_text(
+                f"✍️ Напиши числа месяца для *{d['name']}*\n\nПример: `1 и 24` или `15`",
+                parse_mode="Markdown"); return
+        elif mode == "weekday":
+            wd = int(parts[3]) if len(parts) > 3 else 0
+            sched = {"type":"weekday","weekday":wd}
+        else:
+            await query.edit_message_text("🤔 Не понял."); return
+        sched_str = json.dumps(sched, ensure_ascii=False)
+        save_setting(f"debt_schedule_{did}", sched_str)
+        if context.job_queue:
+            _schedule_debt_reminder(context.job_queue, did, chat_id, sched_str)
+        label = _sched_label(sched_str)
+        await query.edit_message_text(f"✅ Буду напоминать о *{d['name']}* — *{label}* 🔔",
+                                      parse_mode="Markdown"); return
+
     if data.startswith("dremind_"):
         parts = data.split("_")
         did, days = parts[1], int(parts[2])
         if did not in debts: await query.edit_message_text("Долг уже закрыт."); return
         d = debts[did]
+        sched = {"type":"interval","days":days}
+        sched_str = json.dumps(sched, ensure_ascii=False)
+        save_setting(f"debt_schedule_{did}", sched_str)
         for job in context.job_queue.get_jobs_by_name(f"debt_{did}"): job.schedule_removal()
         context.job_queue.run_once(send_debt_reminder, when=timedelta(days=days),
             data={"debt_id":did,"chat_id":chat_id}, name=f"debt_{did}")
@@ -3053,6 +3325,8 @@ def main():
         app.job_queue.run_daily(send_weekly_insight,    time=dtime(19, 0, tzinfo=KYIV_TZ), days=(4,), data={"chat_id": CHAT_ID})
         app.job_queue.run_daily(send_morning_briefing,  time=dtime(9,  0, tzinfo=KYIV_TZ), data={"chat_id": CHAT_ID})
         app.job_queue.run_daily(fire_recurring_payments,time=dtime(9,  5, tzinfo=KYIV_TZ), data={"chat_id": CHAT_ID})
+        # Восстанавливаем напоминания о долгах после рестарта
+        restore_debt_reminders(app.job_queue)
 
     logger.info("AI-агент запущен! v5.8 🤖")
     app.run_polling()
