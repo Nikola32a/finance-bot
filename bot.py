@@ -801,8 +801,11 @@ def load_debts():
 
 def save_debt(did, name, amounts, date, note="", interest=0.0):
     amt_str = amounts_str(amounts)
-    try: _debts_sheet().append_row([did, name, amt_str, date, "активен", note, interest])
-    except Exception as e: logger.error(f"save_debt: {e}")
+    try:
+        _debts_sheet().append_row([did, name, amt_str, date, "активен", note, interest])
+        logger.info(f"save_debt: ID={did}, имя={name}, сумма={amt_str}, дата={date}, процент={interest}")
+    except Exception as e:
+        logger.error(f"save_debt: {e}")
 
 def mark_paid(did):
     try:
@@ -821,16 +824,38 @@ def update_debt_amounts(did, new_amounts):
     except Exception as e: logger.error(f"update_debt_amounts: {e}")
 
 def update_debt_interest(did, interest: float):
-    """Сохраняет процентную ставку долга в Google Sheets (колонка 7 = Процент)."""
+    """Сохраняет процентную ставку долга в Google Sheets по имени колонки «Процент»."""
     try:
         sh = _debts_sheet()
+        headers = sh.row_values(1)
+        # Ищем колонку "Процент" по имени (надёжнее чем по номеру)
+        try:
+            interest_col = headers.index("Процент") + 1
+        except ValueError:
+            # Колонки нет — добавляем
+            interest_col = len(headers) + 1
+            sh.update_cell(1, interest_col, "Процент")
         for i, r in enumerate(sh.get_all_records(), start=2):
             if str(r.get("ID")) == str(did):
-                sh.update_cell(i, 7, interest)
-                logger.info(f"update_debt_interest: долг {did} → {interest}%/мес")
+                sh.update_cell(i, interest_col, interest)
+                logger.info(f"update_debt_interest: долг {did} → {interest}%/мес (col {interest_col})")
                 return
+        logger.warning(f"update_debt_interest: долг {did} не найден в таблице")
     except Exception as e:
         logger.error(f"update_debt_interest: {e}")
+
+def calc_debt_with_interest(principal: float, interest_monthly: float, days: int) -> tuple[float, float]:
+    """Считает сложный процент (compound).
+    interest_monthly — % в месяц (напр. 3.0 = 3%).
+    Возвращает (total_with_interest, accrued).
+    Формула: P * (1 + r/30)^days, где r = interest/100
+    """
+    if not interest_monthly or days <= 0:
+        return principal, 0.0
+    daily_rate = interest_monthly / 100 / 30
+    total = principal * ((1 + daily_rate) ** days)
+    accrued = total - principal
+    return total, accrued
 
 def amounts_str(amounts: list) -> str:
     return " + ".join(f"{a['amount']} {CURRENCY_SYMBOLS.get(a.get('currency','UAH'),'₴')}" for a in amounts)
@@ -842,37 +867,33 @@ def format_amounts(amounts: list) -> str:
 def build_debts_msg() -> str:
     if not debts: return "✅ Активных долгов нет!"
     lines = ["💸 *Мне должны:*\n"]
-    totals: dict = defaultdict(float)  # итоговые суммы с процентами
+    totals: dict = defaultdict(float)  # итог с процентами
     for d in debts.values():
         try:
             days_ago = (datetime.now(KYIV_TZ) - datetime.strptime(d["date"], "%d.%m.%Y").replace(tzinfo=KYIV_TZ)).days
         except:
             days_ago = 0
         note = f" — _{d['note']}_" if d.get("note") else ""
-        ams = d.get("amounts",[{"amount":d.get("amount",0),"currency":"UAH"}])
+        ams = d.get("amounts", [{"amount": d.get("amount", 0), "currency": "UAH"}])
         interest = d.get("interest", 0)
-        interest_str = f" · 📈 {interest}%/мес" if interest else ""
+        interest_str = f" · 📈 {interest}%/мес ({round(interest*12, 1)}%/год)" if interest else ""
         accrued_str = ""
-        if interest and days_ago > 0:
-            daily_rate = interest / 100 / 30
-            for a in ams:
-                principal = float(a["amount"])
-                total_with_interest = principal * ((1 + daily_rate) ** days_ago)
-                accrued = total_with_interest - principal
-                sym = CURRENCY_SYMBOLS.get(a.get("currency","UAH"),"₴")
+        for a in ams:
+            principal = float(a["amount"])
+            cur = a.get("currency", "UAH")
+            sym = CURRENCY_SYMBOLS.get(cur, "₴")
+            if interest and days_ago > 0:
+                total, accrued = calc_debt_with_interest(principal, interest, days_ago)
                 accrued_str += (f"\n   📈 Начислено: *+{fmt(accrued)} {sym}*"
-                                f"\n   💰 Итого с %: *{fmt(total_with_interest)} {sym}*")
-                # В итог добавляем сумму С процентами
-                totals[a.get("currency","UAH")] += total_with_interest
-        else:
-            # Без процентов — добавляем голую сумму
-            for a in ams:
-                totals[a.get("currency","UAH")] += float(a["amount"])
+                                f"\n   💰 Итого с %: *{fmt(total)} {sym}*")
+                totals[cur] += total
+            else:
+                totals[cur] += principal
         lines.append(f"👤 *{d['name']}* — {format_amounts(ams)}{note}{interest_str}")
         lines.append(f"   📅 {d['date']} ({days_ago} дн. назад){accrued_str}")
     if totals:
         lines.append("")
-        for cur in ["USD","EUR","UAH"]:
+        for cur in ["USD", "EUR", "UAH"]:
             if cur in totals:
                 sym = CURRENCY_SYMBOLS[cur]
                 lines.append(f"💰 Итого в {sym}: *{fmt(totals[cur])} {sym}*")
@@ -1450,11 +1471,14 @@ async def send_debt_reminder(context: ContextTypes.DEFAULT_TYPE):
     # Считаем текущую сумму с процентами
     interest_line = ""
     if interest and days_ago > 0:
-        daily_rate = interest / 100 / 30
-        total_now = sum(float(a["amount"]) * ((1 + daily_rate) ** days_ago) for a in ams)
-        principal = sum(float(a["amount"]) for a in ams)
-        accrued = total_now - principal
+        total_now = 0.0
+        principal_total = 0.0
         sym = CURRENCY_SYMBOLS.get(ams[0].get("currency","UAH"),"₴") if ams else "₴"
+        for a in ams:
+            t, _ = calc_debt_with_interest(float(a["amount"]), interest, days_ago)
+            total_now += t
+            principal_total += float(a["amount"])
+        accrued = total_now - principal_total
         interest_line = f"\n📈 С процентами: *{fmt(total_now)} {sym}* (+{fmt(accrued)} {sym})"
     kb = inline_kb([[("✅ Вернули","paid_"+did),("⏰ Напомнить ещё","remind_"+did)]])
     await context.bot.send_message(
@@ -1618,20 +1642,23 @@ async def send_morning_briefing(context: ContextTypes.DEFAULT_TYPE):
     day_name = day_names_short[now.weekday()]
     lines = [f"☀️ *Доброе утро! {now.strftime('%d.%m')} ({day_name})*\n"]
 
-    # Вчерашние траты (корректно — берём записи за вчера)
+    # Вчерашние траты
     yesterday_recs = get_yesterday_records()
     yesterday_spent = sum_records(yesterday_recs)
     if yesterday_spent > 0:
-        lines.append(f"📌 Вчера потрачено: *{fmt(yesterday_spent)} ₴*")
+        lines.append(f"📌 *Вчера потрачено: {fmt(yesterday_spent)} ₴*")
         if yesterday_recs:
             sk = get_sum_key(yesterday_recs)
             # Топ-3 траты за вчера по сумме
             top3 = sorted(yesterday_recs, key=lambda r: float(r.get(sk, 0) or 0), reverse=True)[:3]
             for r in top3:
-                cat = r.get("Категория", "?")
+                cat = r.get("Категория") or "?"
                 amt = float(r.get(sk, 0) or 0)
-                desc = r.get("Описание", "—")
-                lines.append(f"   {get_category_emoji(cat)} {desc} — *{fmt(amt)} ₴*")
+                desc = r.get("Описание") or ""
+                # Если описание пустое — используем категорию
+                label = desc if desc and desc not in ("—", "-", "") else cat
+                em = get_category_emoji(cat)
+                lines.append(f"   {em} {label} — *{fmt(amt)} ₴*")
     else:
         lines.append("📌 Вчера трат не было 👌")
 
