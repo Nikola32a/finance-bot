@@ -384,9 +384,9 @@ def get_category_emoji(cat: str) -> str:
             return emoji
     first = low[0] if low else ""
     misc = {"а":"🅰️","б":"💼","в":"💡","г":"🏪","д":"📋","е":"⚡","з":"🔑","и":"💎","к":"🛍",
-            "л":"🌿","м":"🎯","н":"🔔","о":"⭕","п":"📦","р":"🔴","с":"⭐","т":"🏷","у":"🎓",
+            "л":"🌿","м":"🎯","н":"🔔","о":"⭕","п":"📋","р":"🔴","с":"⭐","т":"🏷","у":"🎓",
             "ф":"🔵","х":"🏠","ц":"💰","ч":"⏰","ш":"🛒","э":"⚙️","ю":"🌍","я":"🧩"}
-    return misc.get(first, "📦")
+    return misc.get(first, "📋")
 
 def fmt(amt: float) -> str:
     return f"{amt:,.0f}"
@@ -1126,7 +1126,6 @@ def parse_expenses(text: str) -> list:
 # ── ФИНАНСОВЫЙ КОНТЕКСТ ───────────────────────────────────────────────────────
 def get_financial_context(chat_id) -> str:
     now = datetime.now(KYIV_TZ)
-    # Все записи из Google Sheets — полный доступ для ИИ
     all_recs = get_all_records()
     period_recs = get_period_records(chat_id)
     month_recs = get_current_month_records()
@@ -1134,7 +1133,6 @@ def get_financial_context(chat_id) -> str:
     s = analyze_records(recs)
     bs = get_budget_status(chat_id)
     sal = get_salary_info(chat_id)
-    # Вчерашние траты
     yesterday_recs = get_yesterday_records()
     yesterday_spent = sum_records(yesterday_recs)
     period_start = get_period_start(chat_id)
@@ -1144,7 +1142,21 @@ def get_financial_context(chat_id) -> str:
         parts.append(f"Траты за период (с {period_start.strftime('%d.%m')}): {fmt(s['total'])} ₴")
         cats = "; ".join(f"{c}: {fmt(a)}₴" for c,a in sorted(s["by_category"].items(), key=lambda x:-x[1])[:5])
         parts.append(f"По категориям текущий период: {cats}")
-    # Прошлые месяцы — полная история из таблицы
+    # Последние 30 записей с описаниями (для поиска по конкретным тратам)
+    if all_recs:
+        sk = get_sum_key(all_recs)
+        recent = all_recs[-50:]
+        recent_lines = []
+        for r in recent:
+            desc = r.get("Описание","")
+            cat = r.get("Категория","")
+            amt = r.get(sk,"")
+            date = r.get("Дата","")[:10]
+            if desc or cat:
+                recent_lines.append(f"{date}: {desc or cat} — {amt}₴ [{cat}]")
+        if recent_lines:
+            parts.append(f"\nПоследние записи (для поиска):\n" + "\n".join(recent_lines[-30:]))
+    # История по месяцам
     for ago in range(1, 4):
         t = now.replace(day=1)
         for _ in range(ago):
@@ -1158,15 +1170,13 @@ def get_financial_context(chat_id) -> str:
     if bs:
         parts.append(f"Бюджет: {fmt(bs['budget'])}₴, использовано {bs['percent']}%, осталось {fmt(bs['left'])}₴")
     if sal:
-        sal_day = sal['day']
-        parts.append(f"День зарплаты: {sal_day}-е число, сумма: {sal.get('amount','?')}₴")
+        parts.append(f"День зарплаты: {sal['day']}-е число, сумма: {sal.get('amount','?')}₴")
     if debts:
         dl = "; ".join(f"{d['name']}: {format_amounts(d['amounts']).replace('*','')}" for d in list(debts.values())[:5])
         parts.append(f"Мне должны: {dl}")
     if goals:
         gl = "; ".join(f"{g['name']}: {fmt(g['saved'])}/{fmt(g['target'])}₴" for g in list(goals.values())[:3])
         parts.append(f"Цели: {gl}")
-    # Общая статистика по всем записям
     if all_recs:
         parts.append(f"Всего записей в таблице: {len(all_recs)}")
     return "\n".join(parts)
@@ -1177,43 +1187,50 @@ _ai_chat_history: dict = {}
 async def ai_chat_response(chat_id, user_message: str) -> str:
     if chat_id not in _ai_chat_history: _ai_chat_history[chat_id] = []
     history = _ai_chat_history[chat_id]
+    fin_ctx = get_financial_context(chat_id)
     system = f"""Ты личный финансовый ИИ-ассистент в Telegram. Отвечай КРАСИВО и СТРУКТУРИРОВАНО.
 
 ПРАВИЛА ФОРМАТИРОВАНИЯ (ОБЯЗАТЕЛЬНО):
 - Используй *жирный* для цифр и ключевых слов
 - Каждый факт/блок — с новой строки
 - Эмодзи в начале каждой смысловой строки
-- Максимум 5-7 строк в ответе — кратко и по делу
+- Максимум 5-7 строк — кратко и по делу
 - НЕ пиши сплошным текстом — только структура
-- Числа всегда с пробелами: *11 855 $*, *300 ₴* (не "11855$")
-- При перечислении долгов — каждый долг на отдельной строке
+- Числа с пробелами: *11 855 $*, *300 ₴*
+- При перечислении — каждый элемент на отдельной строке
 
-ФОРМАТ ДЛЯ РАЗНЫХ ЗАПРОСОВ:
+ПРАВИЛА ПОИСКА ПО ЗАПИСЯМ:
+- В разделе "Последние записи" ищи по описанию, категории и дате
+- "билеты", "поезд", "поїзд" — ищи в описаниях записей (не только в категории!)
+- Если нашёл — выдай: дату, описание, сумму, категорию
+- Если не нашёл за текущий период — проверь прошлые месяцы
+- "когда оплатил X" — ищи X в описаниях всех записей
+- "сколько потрачено на X" — суммируй все записи где X встречается в описании или категории
 
-Вопрос о долгах → карточки:
-👤 *Имя* — *сумма* (N дн.)
+ФОРМАТЫ ОТВЕТОВ:
+
+Поиск конкретной траты:
+🔍 *[название]*
+📅 [дата]: *[сумма] ₴* — [описание]
+📂 Категория: [категория]
+
+Сумма по категории/описанию:
+💰 *[X] всего:* N ₴
+├ [дата]: описание — сумма
+├ [дата]: описание — сумма
+└ [дата]: описание — сумма
+
+Долги:
 👤 *Имя* — *сумма* (N дн.)
 💰 Итого: *X $* + *Y ₴*
 
-Вопрос о тратах → блоки:
-📊 *Категория:* X ₴ (N%)
-📊 *Категория:* X ₴ (N%)
-💡 *Вывод:* одна строка
-
-Совет → нумерованный список:
-💡 *Персональные советы*
-
-1️⃣ *Совет с цифрой* — объяснение
-2️⃣ *Совет с цифрой* — объяснение
-3️⃣ *Совет с цифрой* — объяснение
-
 ДАННЫЕ ПОЛЬЗОВАТЕЛЯ:
-{get_financial_context(chat_id)}"""
+{fin_ctx}"""
     messages = [{"role":"system","content":system}]
     messages.extend(history[-10:])
     messages.append({"role":"user","content":user_message})
     try:
-        response = groq_chat(messages, max_tokens=600)
+        response = groq_chat(messages, max_tokens=700)
         history.append({"role":"user","content":user_message})
         history.append({"role":"assistant","content":response})
         if len(history) > 20: _ai_chat_history[chat_id] = history[-20:]
@@ -3160,10 +3177,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Выбор процента при создании долга ────────────────────────────────────
     if data.startswith("debt_rate_"):
-        parts = data.split("_")
         # формат: debt_rate_{did}_{value|custom|0}
-        did = parts[2]
-        val_str = parts[3] if len(parts) > 3 else "0"
+        # Используем rsplit чтобы не ломать did с цифрами
+        prefix = "debt_rate_"
+        rest = data[len(prefix):]  # например "5_1.5" или "15_custom"
+        # Ищем последнее _ как разделитель did и value
+        last_sep = rest.rfind("_")
+        if last_sep == -1:
+            await query.edit_message_text("🤔 Ошибка данных."); return
+        did = rest[:last_sep]
+        val_str = rest[last_sep+1:]
         if did not in debts:
             await query.edit_message_text("Долг уже закрыт."); return
         d = debts[did]
@@ -3180,11 +3203,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rate = 0.0
         debts[did]["interest"] = rate
         update_debt_interest(did, rate)
+        logger.info(f"debt_rate callback: did={did}, val_str='{val_str}', rate={rate}")
         if rate > 0:
             ams = d.get("amounts", [])
             txt = (f"✅ *{d['name']}* — {format_amounts(ams)}\n"
-                   f"📈 Процент: *{rate}%/мес* установлен\n"
-                   f"_Буду считать сумму долга на каждый день_\n\n"
+                   f"📈 Процент: *{rate}%/мес* ({round(rate*12,1)}%/год) установлен\n"
+                   f"_Сложный процент, считается каждый день_\n\n"
                    f"⏰ Напомню через {reminder_label(chat_id)}.")
         else:
             txt = (f"✅ *{d['name']}* — записан без процентов.\n"
