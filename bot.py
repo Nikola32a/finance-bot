@@ -773,8 +773,21 @@ def _mono_tx_to_expense(tx: dict, account_ccy: str = "UAH") -> dict | None:
     mcc = tx.get("mcc", 0)
     time_ts = tx.get("time", 0)
 
-    # Пропускаем переводы и пополнения по описанию
-    if NON_EXPENSE_PATTERNS.search(description):
+    # Пропускаем внутренние переводы между своими счетами Monobank и cashback
+    # Используем отдельный паттерн — НЕ NON_EXPENSE_PATTERNS (тот слишком жадный)
+    MONO_SKIP = re.compile(
+        r"(переказ\s+між\s+рахунк|перевод\s+между\s+счет"
+        r"|від\s+[А-ЯЁа-яёіїє]+\s+[А-ЯЁа-яёіїє]"   # "Від Іваненко" — p2p входящий (но у нас amount<0 значит исходящий p2p)
+        r"|monobank\s+cashback|кешбек|кэшбек"
+        r"|відсотки\s+за\s+депозит|проценти\s+по\s+депозит"
+        r")",
+        re.IGNORECASE
+    )
+    if MONO_SKIP.search(description):
+        return None
+
+    # MCC 4829 = wire transfer / переводы денег — пропускаем
+    if mcc in (4829, 6012, 6051, 6211):
         return None
 
     category = _mcc_to_category(mcc)
@@ -824,30 +837,44 @@ async def cmd_mono(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     accounts = client_info.get("accounts", [])
-    # Фильтруем только UAH-счета (чёрные и белые карты)
-    uah_accounts = [a for a in accounts if a.get("currencyCode") == 980 and a.get("type") in ("black", "white", "eAid", "fop")]
-    if not uah_accounts:
-        uah_accounts = [a for a in accounts if a.get("currencyCode") == 980][:1]
+    client_name = client_info.get("name", "")
+    logger.info(f"Monobank client: {client_name}, счетов: {len(accounts)}")
+    for a in accounts:
+        logger.info(f"  account: id={a.get('id','?')[:8]}... type={a.get('type')} ccy={a.get('currencyCode')} balance={a.get('balance',0)/100:.0f}")
+
+    # Берём все UAH-счета (не фильтруем по type — у разных карт разные типы)
+    uah_accounts = [a for a in accounts if a.get("currencyCode") == 980]
 
     if not uah_accounts:
         await update.message.reply_text("❌ Не нашёл UAH-счёт в аккаунте.")
         return
 
+    # Если счетов несколько — предпочитаем "black" и "white", остальные тоже берём (не более 2)
+    preferred = [a for a in uah_accounts if a.get("type") in ("black", "white", "eAid", "fop")]
+    selected_accounts = preferred[:2] if preferred else uah_accounts[:2]
+    logger.info(f"Выбрано счетов для запроса: {len(selected_accounts)}")
+
     now_ts = int(datetime.now(KYIV_TZ).timestamp())
     from_ts = int((datetime.now(KYIV_TZ) - timedelta(days=days_back)).timestamp())
 
     all_txs = []
-    for acc in uah_accounts[:2]:  # максимум 2 счёта за раз
+    for acc in selected_accounts:
         acc_id = acc.get("id", "0")
         txs = await fetch_mono_transactions(acc_id, from_ts, now_ts)
+        logger.info(f"Monobank account {acc_id[:8]}... ({acc.get('type')}): получено {len(txs)} транзакций")
         all_txs.extend(txs)
-        if len(uah_accounts) > 1:
-            await asyncio.sleep(61)  # Monobank: лимит 1 запрос в 60 сек
+        if len(selected_accounts) > 1:
+            await asyncio.sleep(62)  # Monobank: лимит 1 запрос в 60 сек
 
     if not all_txs:
+        acc_info = ", ".join(f"{a.get('type','?')} ({a.get('id','')[:6]}...)" for a in selected_accounts)
         await update.message.reply_text(
-            f"📭 За {days_back} дней транзакций не найдено.\n"
-            "_Примечание: Monobank позволяет 1 запрос в 60 секунд_",
+            f"📭 За {days_back} дней транзакций не найдено.\n\n"
+            f"_Счета: {acc_info}_\n"
+            f"_Период: {datetime.fromtimestamp(from_ts, tz=KYIV_TZ).strftime('%d.%m')} — "
+            f"{datetime.fromtimestamp(now_ts, tz=KYIV_TZ).strftime('%d.%m.%Y')}_\n\n"
+            f"Попробуй `/mono 30` — увеличь период.\n"
+            f"Или проверь логи бота — возможно rate limit (подожди 60 сек).",
             parse_mode="Markdown"
         )
         return
@@ -860,7 +887,10 @@ async def cmd_mono(update: Update, context: ContextTypes.DEFAULT_TYPE):
             expenses.append(exp)
 
     if not expenses:
-        await update.message.reply_text(f"📭 За {days_back} дней расходов не найдено (только пополнения).")
+        await update.message.reply_text(
+            f"📭 Из {len(all_txs)} транзакций за {days_back} дней расходов не найдено.\n"
+            f"_Все операции — пополнения или переводы._"
+            , parse_mode="Markdown")
         return
 
     # Проверяем дубликаты по tx_id в настройках
@@ -1282,21 +1312,62 @@ def build_recurring_msg() -> str:
     return "\n".join(lines)
 
 async def fire_recurring_payments(context: ContextTypes.DEFAULT_TYPE):
-    """Проверяем регулярные платежи — запускается ежедневно."""
+    """Проверяем регулярные платежи — запускается ежедневно в 09:05."""
     if not CHAT_ID: return
     now = datetime.now(KYIV_TZ)
     today = now.day
+    today_str = now.strftime("%d.%m.%Y")  # уникальный ключ "день уже выполнен"
     fired = []
     for rid, r in recurring.items():
-        if r["day"] == today:
-            date_str = now.strftime("%d.%m.%Y %H:%M")
-            save_expense(date_str, r["amount"], r["category"], r["name"], f"авто: {r['name']}")
-            fired.append(r)
+        if r["day"] != today:
+            continue
+        # Проверяем — не выполняли ли уже сегодня этот платёж
+        last_fired_key = f"recurring_last_{rid}"
+        last_fired = get_setting(last_fired_key)
+        if last_fired == today_str:
+            logger.info(f"recurring {rid} ({r['name']}): уже выполнен сегодня, пропускаем")
+            continue
+        date_str = now.strftime("%d.%m.%Y %H:%M")
+        save_expense(date_str, r["amount"], r["category"], r["name"], f"авто: {r['name']}")
+        save_setting(last_fired_key, today_str)  # запоминаем что сегодня уже сработал
+        fired.append(r)
     if fired:
         lines = ["🔄 *Автоплатежи сегодня:*\n"]
         for r in fired:
             lines.append(f"{r['emoji']} *{r['name']}* — {fmt(r['amount'])} ₴")
         await context.bot.send_message(chat_id=CHAT_ID, text="\n".join(lines), parse_mode="Markdown")
+
+async def check_missed_recurring(app):
+    """
+    После перезагрузки проверяем — не пропустили ли мы автоплатежи сегодня
+    (бот мог быть выключен в 09:05 когда должны были сработать платежи).
+    """
+    if not CHAT_ID or not recurring: return
+    now = datetime.now(KYIV_TZ)
+    today = now.day
+    today_str = now.strftime("%d.%m.%Y")
+    missed = []
+    for rid, r in recurring.items():
+        if r["day"] != today:
+            continue
+        last_fired_key = f"recurring_last_{rid}"
+        last_fired = get_setting(last_fired_key)
+        if last_fired == today_str:
+            continue  # уже выполнен
+        # Пропустили! Выполняем сейчас
+        date_str = now.strftime("%d.%m.%Y %H:%M")
+        save_expense(date_str, r["amount"], r["category"], r["name"], f"авто: {r['name']}")
+        save_setting(last_fired_key, today_str)
+        missed.append(r)
+        logger.info(f"check_missed_recurring: догнали платёж {r['name']} за {today_str}")
+    if missed:
+        lines = ["🔄 *Автоплатежи (после перезапуска):*\n"]
+        for r in missed:
+            lines.append(f"{r['emoji']} *{r['name']}* — {fmt(r['amount'])} ₴")
+        try:
+            await app.bot.send_message(chat_id=CHAT_ID, text="\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"check_missed_recurring send: {e}")
 
 # ── GROQ / LLM ───────────────────────────────────────────────────────────────
 def transcribe(path: str) -> str:
@@ -3711,6 +3782,8 @@ def main():
         app.job_queue.run_daily(fire_recurring_payments,time=dtime(9,  5, tzinfo=KYIV_TZ), data={"chat_id": CHAT_ID})
         # Восстанавливаем напоминания о долгах после рестарта
         restore_debt_reminders(app.job_queue)
+        # Проверяем пропущенные автоплатежи после рестарта (если бот был выключен в 09:05)
+        app.job_queue.run_once(lambda ctx: asyncio.ensure_future(check_missed_recurring(app)), when=5)
 
     logger.info("AI-агент запущен! v5.8 🤖")
     app.run_polling()
