@@ -1038,7 +1038,7 @@ def transcribe(path: str) -> str:
 
 def _llm(messages: list, max_tokens=600, temperature=0.0) -> str:
     r = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",   # было llama-3.3-70b-versatile
         messages=messages, max_tokens=max_tokens, temperature=temperature,
     )
     return r.choices[0].message.content.strip()
